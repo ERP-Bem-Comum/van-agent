@@ -1,0 +1,17 @@
+# Binários compilados. O artefato de release é publicado, nunca commitado.
+/van-agent
+/van-agent.exe
+*.exe
+
+# Saída de teste e cobertura
+*.out
+*.test
+
+# ⚠️ Nada de material do fornecedor entra neste repositório.
+# O manual do STCP OFTP Client tem restrição de redistribuição e vive local-only no core-api,
+# em handbook/guidelines/. Se um PDF aparecer aqui, é engano — não é lugar dele.
+*.pdf
+
+# Config real de instalação: caminhos, perfil e OdetteID identificam o convênio.
+.env
+*.ini

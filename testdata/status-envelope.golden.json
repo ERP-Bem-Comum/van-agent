@@ -1,0 +1,84 @@
+{
+  "descricao": "Contrato do prefixo status/ da VAN. Produzido pelo van-agent, consumido pelo core-api (src/modules/financial/adapters/van/status-envelope.ts). Gerado por `go test ./internal/envelope -update` — não editar à mão.",
+  "fonte": "ADR-0061 §2 · manual STCP OFTP Client v5.3 §12 p.30 (layout do log de transferências)",
+  "casos": [
+    {
+      "nome": "remessa transmitida",
+      "tipo": "remittance",
+      "contaComoTransmissao": true,
+      "chave": "status/PAG_000000.20260818120000_0001.REM.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818120000_0001.REM",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "transmitido",
+        "detalhe": "arquivo saiu da pasta de saída e apareceu em backup",
+        "exitCode": 0,
+        "logTransferencia": [
+          "202608181200000004PERFIL-DE-TESTE               STCPCLT         0000123400005678000000000000000240PAG_000000.20260818120000_0001.REM                                                                                                                                                                                                                                                                                                                                                              ",
+          "202608181200000005PERFIL-DE-TESTE               STCPCLT         0000123400005678000000000000000240PAG_000000.20260818120000_0001.REM                                                                                                                                                                                                                                                                                                                                                              "
+        ]
+      }
+    },
+    {
+      "nome": "remessa recusada pelo transporte",
+      "tipo": "remittance",
+      "contaComoTransmissao": false,
+      "chave": "status/PAG_000000.20260818120000_0001.REM.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818120000_0001.REM",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "falha",
+        "detalhe": "arquivo permanece na pasta de saída; nada foi transmitido; código de saída do cliente: 1",
+        "exitCode": 1,
+        "logTransferencia": [
+          "202608181200000004PERFIL-DE-TESTE               STCPCLT         0000123400005678000000000000000240PAG_000000.20260818120000_0001.REM                                                                                                                                                                                                                                                                                                                                                              ",
+          "202608181200000005PERFIL-DE-TESTE               STCPCLT         0000123400005678000401000000000240PAG_000000.20260818120000_0001.REM                                                                                                                                                                                                                                                                                                                                                              "
+        ]
+      }
+    },
+    {
+      "nome": "tentativa duplicada — cliente não acionado",
+      "tipo": "duplicate",
+      "contaComoTransmissao": false,
+      "chave": "status/PAG_000000.20260818120000_0001.REM.duplicado-20260818T120000Z.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818120000_0001.REM",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "transmitido",
+        "detalhe": "nome já processado em 2026-08-18T11:00:00Z com situação \"transmitido\"; o cliente STCP não foi acionado",
+        "exitCode": null,
+        "logTransferencia": []
+      }
+    },
+    {
+      "nome": "execução interrompida — revisão humana",
+      "tipo": "remittance",
+      "contaComoTransmissao": false,
+      "chave": "status/PAG_000000.20260818120000_0001.REM.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818120000_0001.REM",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "revisao",
+        "detalhe": "execução anterior foi interrompida após gravar a intenção e antes de registrar o desfecho; o arquivo pode ter sido transmitido e NÃO é retransmitido automaticamente — exige conferência humana",
+        "exitCode": null,
+        "logTransferencia": []
+      }
+    },
+    {
+      "nome": "ciclo de recepção com arquivo recebido",
+      "tipo": "reception",
+      "contaComoTransmissao": false,
+      "chave": "status/recepcao-20260818T120000Z.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818110000_0001.RET",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "recepcao",
+        "detalhe": "1 arquivo recebido do banco e enviado ao prefixo de retorno",
+        "exitCode": 0,
+        "logTransferencia": [
+          "202608181200000007PERFIL-DE-TESTE               STCPCLT         0000123400005678000000000000000240PAG_000000.20260818110000_0001.RET                                                                                                                                                                                                                                                                                                                                                              "
+        ]
+      }
+    }
+  ]
+}
