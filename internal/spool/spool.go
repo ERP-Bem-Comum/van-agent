@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -212,7 +213,7 @@ func (d *Dir) InBackup(fileName string) (bool, error) { return exists(d.cfg.Back
 // arquivo, ele não leu log algum; com arquivo vazio, ele leu e não havia linha. Só a segunda
 // sustenta uma conclusão sobre o que o cliente registrou.
 func (d *Dir) ReadTransferLog() (string, bool, error) {
-	matches, err := filepath.Glob(filepath.Join(d.cfg.LogDir, d.cfg.TransferLogGlob))
+	matches, err := casarLogs(d.cfg.LogDir, d.cfg.TransferLogGlob, caixaImportaNoSistema)
 	if err != nil {
 		return "", false, fmt.Errorf("procurar log de transferências: %w", err)
 	}
@@ -302,4 +303,61 @@ func (d *Dir) Archive(fileName string) error {
 		return fmt.Errorf("arquivar %q: %w", fileName, err)
 	}
 	return nil
+}
+
+// caixaImportaNoSistema diz se o sistema de arquivos distingue maiúsculas de minúsculas.
+//
+// É `var` e não constante para que o teste exercite OS DOIS regimes na mesma máquina. Sem isso, o
+// caminho do Windows ficaria sem cobertura justamente aqui — que é a plataforma de destino, onde
+// ninguém roda a suíte, e onde o defeito existe.
+var caixaImportaNoSistema = runtime.GOOS != "windows"
+
+// casarLogs acha os arquivos de `dir` que casam o padrão, respeitando o regime de caixa do sistema.
+//
+// Por que isto não é `filepath.Glob`: `filepath.Match` do Go é case-sensitive em TODAS as
+// plataformas — não há case folding nem no Windows. Mas o filesystem do Windows é
+// case-INsensitive, e para quem configura a instalação (e para o Explorer, e para o `dir`, e para o
+// próprio cliente) `*.LOG` e `*.log` designam o mesmo conjunto de arquivos.
+//
+// A divergência é silenciosa e cara: o padrão não casa nada, `ReadTransferLog` devolve "não li log
+// nenhum", e o agente publica `logDoCicloLido: false` em todo retorno — comportamento correto, mas
+// que significa que a correlação nunca funciona sem que nada emita erro. E o operador não tem por
+// que desconfiar: no Linux ele já espera que a caixa importe; no Windows, não.
+//
+// Onde o sistema distingue caixa, o comportamento NÃO muda. Lá dois nomes que diferem só na caixa
+// são dois arquivos, e casar ambos escolheria um deles por acidente de ordenação — o oposto de
+// errar para menos.
+func casarLogs(dir, padrao string, caixaImporta bool) ([]string, error) {
+	// Valida o padrão uma vez, contra um nome qualquer: `filepath.Match` só reporta padrão inválido
+	// quando chega a compará-lo, e um padrão malformado precisa virar erro em vez de "não casou
+	// nada" — que o chamador leria como ausência de log.
+	if _, err := filepath.Match(padrao, "x"); err != nil {
+		return nil, fmt.Errorf("padrão de log inválido %q: %w", padrao, err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Pasta de log ausente é "nenhum log", não erro: o log é diagnóstico, e o ciclo não pode
+			// parar por causa dele. Quem cobra a existência das pastas é o boot.
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		nome := e.Name()
+		alvo, agulha := nome, padrao
+		if !caixaImporta {
+			alvo, agulha = strings.ToLower(nome), strings.ToLower(padrao)
+		}
+		if ok, _ := filepath.Match(agulha, alvo); ok {
+			out = append(out, filepath.Join(dir, nome))
+		}
+	}
+	return out, nil
 }

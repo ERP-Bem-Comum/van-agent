@@ -177,6 +177,10 @@ A terceira linha é a que existe para não ser confundida com a segunda. Um cons
 
 ⚠️ O carimbo do log não traz zona: é a hora local da máquina que roda o cliente, e é assim que o agente o interpreta. Um erro de fuso aqui não desloca a janela para longe do log de ontem — desloca para longe do log de **hoje**.
 
+**A caixa do `TRANSFER_LOG_GLOB` segue o sistema de arquivos, não o Go.** `filepath.Match` do Go é case-sensitive em **todas** as plataformas, mas o filesystem do Windows não é — e para quem configura a instalação, `*.LOG` e `*.log` designam o mesmo conjunto. O agente concorda com a plataforma: no Windows o padrão casa independente da caixa; onde o sistema distingue (Linux, macOS), o comportamento continua estrito, porque lá dois nomes que só diferem na caixa são dois arquivos e casar ambos escolheria um por acidente de ordenação.
+
+Sem isso, um padrão com a caixa "errada" no Windows produzia `logDoCicloLido: false` em **todo** retorno — correto e seguro, mas silencioso: a correlação nunca funcionava e nada emitia erro.
+
 O agente **nunca abre CNAB** — o conteúdo atravessa cru, byte a byte.
 
 #### Idempotência da recepção
@@ -307,7 +311,7 @@ Nenhuma se resolve escrevendo código aqui.
 
 1. **Não existe ambiente de homologação.** A conexão validada em 05/08 é a de **produção, no convênio real**, e todos os eventos até hoje foram de recepção — a transmissão nunca foi exercitada. Um arquivo enviado "para testar" vira pagamento de verdade. **É o maior risco deste trabalho.**
 2. **A nomenclatura do arquivo de remessa não foi confirmada com o banco** — e o nome não é livre: o banco identifica tipo e fila por ele (ADR-0061, "O que continua em aberto" §1).
-3. **O nome do arquivo do log posicional não é documentado.** O manual v5.3 descreve o layout (§12, p.30) e o diretório, mas não o nome; o nome que ele documenta (§7, p.15) é o do log **legível**, que é outro arquivo. Por isso `VAN_AGENT_STCP_TRANSFER_LOG_GLOB` é configuração, com padrão a confirmar contra a instalação.
+3. **O nome do arquivo do log posicional não é documentado.** O manual v5.3 descreve o layout (§12, p.30) e o diretório, mas não o nome; o nome que ele documenta (§7, p.15) é o do log **legível**, que é outro arquivo. Por isso `VAN_AGENT_STCP_TRANSFER_LOG_GLOB` é configuração, com padrão a confirmar contra a instalação. A **caixa** do padrão deixou de ser uma forma de errar (#17), mas o nome em si continua sendo palpite até alguém medir.
 4. **O dialeto da expressão regular do `-f` não é declarado.** O manual diz que o parâmetro aceita expressão regular (§6, p.14) sem dizer qual. O escape cobre os metacaracteres comuns e ancora o nome inteiro; confirmar contra a instalação é pendência.
 5. **O cliente STCP se autoatualiza diariamente** a partir da nuvem do fabricante (§9, p.19). Software mudando sem janela de mudança numa máquina que transmite pagamento — risco conhecido, não nosso a resolver.
 6. **O bucket e a máquina não estão versionados como infraestrutura.** Recriar o ambiente hoje depende de conhecimento que não está em repositório nenhum.
