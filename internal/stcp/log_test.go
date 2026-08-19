@@ -3,6 +3,7 @@ package stcp_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ERP-Bem-Comum/van-agent/internal/stcp"
 )
@@ -168,4 +169,75 @@ func TestUltimaTentativaBemSucedidaApagaOCodigoDeFalhaAnterior(t *testing.T) {
 	if got.FailureCode != "" {
 		t.Errorf("código de falha = %q, esperava vazio após sucesso", got.FailureCode)
 	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A âncora temporal — o que separa "o log deste ciclo" de "algum log"
+// ─────────────────────────────────────────────────────────────────────────────
+
+// O carimbo do §12 não traz zona: é a hora do relógio da máquina que roda o cliente. Lê-lo como UTC
+// deslocaria toda linha pelo offset local, e uma janela deslocada não rejeita o log de ontem — ela
+// rejeita o log de hoje.
+func TestRecordTimeDecodificaNoFusoLocal(t *testing.T) {
+	r := stcp.ParseLine(linhaDeTeste("20260818143000", "0007", "000000", "PAG_000000.RET"))
+
+	got, ok := r.Time()
+	if !ok {
+		t.Fatalf("carimbo %q deveria decodificar", r.OccurredAt)
+	}
+	want := time.Date(2026, 8, 18, 14, 30, 0, 0, time.Local)
+	if !got.Equal(want) {
+		t.Errorf("Time() = %s, esperava %s (hora local, não UTC)", got, want)
+	}
+}
+
+// Linha ilegível não vira erro nem aborta: degrada o diagnóstico, como o resto do parser.
+func TestRecordTimeRecusaCarimboIlegivel(t *testing.T) {
+	r := stcp.ParseLine(linhaDeTeste("nao-e-data---", "0007", "000000", "PAG_000000.RET"))
+
+	if _, ok := r.Time(); ok {
+		t.Error("carimbo ilegível não pode ser dado como decodificado")
+	}
+}
+
+func TestWithinWindowDescartaLinhaDeOutroCiclo(t *testing.T) {
+	inicio := time.Date(2026, 8, 18, 12, 0, 0, 0, time.Local)
+	fim := inicio.Add(30 * time.Second)
+
+	records := []stcp.Record{
+		stcp.ParseLine(linhaDeTeste("20260817120000", "0007", "000000", "ONTEM.RET")),
+		stcp.ParseLine(linhaDeTeste("20260818120010", "0007", "000000", "AGORA.RET")),
+		stcp.ParseLine(linhaDeTeste("20260818130000", "0007", "000000", "DEPOIS.RET")),
+	}
+
+	got := stcp.WithinWindow(records, inicio, fim)
+
+	if len(got) != 1 {
+		t.Fatalf("esperava só a linha desta janela, veio %d: %+v", len(got), got)
+	}
+	if got[0].FileName != "AGORA.RET" {
+		t.Errorf("sobrou a linha errada: %q", got[0].FileName)
+	}
+}
+
+// Sem carimbo legível não há como afirmar que a linha é desta janela — e afirmar sem prova é o erro
+// que o filtro existe para impedir.
+func TestWithinWindowDescartaLinhaSemCarimboLegivel(t *testing.T) {
+	inicio := time.Date(2026, 8, 18, 12, 0, 0, 0, time.Local)
+
+	got := stcp.WithinWindow(
+		[]stcp.Record{stcp.ParseLine(linhaDeTeste("XXXXXXXXXXXXXX", "0007", "000000", "SEM_DATA.RET"))},
+		inicio, inicio.Add(time.Minute))
+
+	if len(got) != 0 {
+		t.Errorf("linha sem carimbo não pode ser dada como desta janela; veio %+v", got)
+	}
+}
+
+// linhaDeTeste encurta a montagem para os campos que a janela de tempo usa, reaproveitando o
+// `buildLine` — que monta por LARGURA, enquanto o parser lê por OFFSET. São dois caminhos
+// independentes para a mesma tabela do §12, e é isso que faz um erro de offset quebrar o teste.
+func linhaDeTeste(carimbo, op, resultado, nome string) string {
+	return buildLine(carimbo, op, "PERFIL-DE-TESTE", "STCPCLT", "00001234", "00005678",
+		resultado, "240", nome, "")
 }

@@ -102,7 +102,28 @@ type ReceptionInfo struct {
 	// `false` NÃO significa "não é confiável": significa que o agente não conseguiu provar a origem
 	// pelo log, e mesmo assim depositou. Erra-se para mais aqui: descartar em silêncio um arquivo do
 	// banco é o desfecho que ninguém percebe.
+	//
+	// ⚠️ Só é interpretável junto com `LogDoCicloLido`. Sozinho, `false` mistura "o log deste ciclo
+	// não foi lido" com "foi lido e não havia a linha" — duas coisas que levam a ações opostas.
 	Correlacionado bool `json:"correlacionado"`
+	// LogDoCicloLido diz se o agente leu o log DESTA execução — ou seja, se `Correlacionado` carrega
+	// uma conclusão ou apenas uma ignorância.
+	//
+	// Ele existe porque o nome do log começa por data (§7, p.15) e o padrão casa o mais recente: no
+	// primeiro ciclo do dia, antes de o cliente escrever o log novo, o agente lê com sucesso o log
+	// de ONTEM. Sem este campo, esse caso — que acontece todo dia — sairia indistinguível de "o
+	// cliente não registrou este arquivo", e um consumidor que represa por não-correlação represaria
+	// todo retorno do primeiro ciclo, diariamente.
+	//
+	// A leitura acordada com o core-api (2026-08-19):
+	//
+	//	true  + Correlacionado false → origem não registrada pelo cliente: suspeito, revisar
+	//	false                        → o agente não sabe; NÃO é sinal sobre o arquivo, e sim sobre a
+	//	                               configuração do agente (padrão do log, pasta, permissão)
+	//
+	// Um booleano que chutasse aqui seria pior que campo nenhum: o consumidor obedeceria a um sinal
+	// errado achando que é preciso.
+	LogDoCicloLido bool `json:"logDoCicloLido"`
 	// Duplicado marca a recepção de um conteúdo que já havia sido recebido antes.
 	Duplicado bool `json:"duplicado,omitempty"`
 	// DuplicadoDe é a chave da recepção anterior com o mesmo conteúdo — o que permite ao consumidor

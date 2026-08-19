@@ -81,12 +81,13 @@
         "recepcao": {
           "sha256": "7c0d65065ec8742d751a41222449f02844d7873a5b28ae6a0b6613c573a56cf1",
           "chave": "retorno/PAG_000000.20260818110000_0001.RET",
-          "correlacionado": true
+          "correlacionado": true,
+          "logDoCicloLido": true
         }
       }
     },
     {
-      "nome": "recepção sem correlação com o log do ciclo",
+      "nome": "recepção sem correlação, com o log do ciclo lido",
       "tipo": "reception",
       "contaComoTransmissao": false,
       "chave": "status/recepcao-20260818T120000Z-PAG_000000.20260818110000_0001.RET.json",
@@ -94,13 +95,34 @@
         "arquivo": "PAG_000000.20260818110000_0001.RET",
         "executadoEm": "2026-08-18T12:00:00Z",
         "situacao": "recepcao",
-        "detalhe": "arquivo encontrado na pasta de entrada SEM linha correspondente no log deste ciclo; depositado assim mesmo, com a origem declarada como não correlacionada",
+        "detalhe": "arquivo encontrado na pasta de entrada SEM linha correspondente no log deste ciclo, que FOI lido; depositado assim mesmo, com a origem declarada como não correlacionada — o cliente não registrou tê-lo recebido nesta execução",
         "exitCode": 0,
         "logTransferencia": [],
         "recepcao": {
           "sha256": "7c0d65065ec8742d751a41222449f02844d7873a5b28ae6a0b6613c573a56cf1",
           "chave": "retorno/PAG_000000.20260818110000_0001.RET",
-          "correlacionado": false
+          "correlacionado": false,
+          "logDoCicloLido": true
+        }
+      }
+    },
+    {
+      "nome": "recepção sem o log do ciclo — o agente não sabe",
+      "tipo": "reception",
+      "contaComoTransmissao": false,
+      "chave": "status/recepcao-20260818T120000Z-PAG_000000.20260818110000_0001.RET.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818110000_0001.RET",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "recepcao",
+        "detalhe": "arquivo encontrado na pasta de entrada e depositado, mas o log DESTA execução não pôde ser lido (padrão sem correspondência, log ainda não escrito ou leitura que falhou); a ausência de correlação NÃO é indício sobre o arquivo — é sobre a configuração do log na instalação, e é ela que precisa ser conferida",
+        "exitCode": 0,
+        "logTransferencia": [],
+        "recepcao": {
+          "sha256": "7c0d65065ec8742d751a41222449f02844d7873a5b28ae6a0b6613c573a56cf1",
+          "chave": "retorno/PAG_000000.20260818110000_0001.RET",
+          "correlacionado": false,
+          "logDoCicloLido": false
         }
       }
     },
@@ -120,6 +142,7 @@
           "sha256": "7c0d65065ec8742d751a41222449f02844d7873a5b28ae6a0b6613c573a56cf1",
           "chave": "retorno/PAG_000000.20260818110000_0001.RET",
           "correlacionado": true,
+          "logDoCicloLido": true,
           "duplicado": true,
           "duplicadoDe": "retorno/PAG_000000.20260818110000_0001.RET"
         }

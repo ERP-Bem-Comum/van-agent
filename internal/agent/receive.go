@@ -28,6 +28,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ERP-Bem-Comum/van-agent/internal/bucket"
 	"github.com/ERP-Bem-Comum/van-agent/internal/envelope"
@@ -44,11 +45,13 @@ type ReceiveOutcome struct {
 	StoredKey string
 	// Correlated diz se o arquivo casou com linha de recepção do log deste ciclo.
 	Correlated bool
-	Duplicate  bool
-	Situation  envelope.Situation
-	StatusKey  string
-	Archived   bool
-	Err        error
+	// LogDoCicloLido diz se o log desta execução foi lido. Sem ele, `Correlated` false é ambíguo.
+	LogDoCicloLido bool
+	Duplicate      bool
+	Situation      envelope.Situation
+	StatusKey      string
+	Archived       bool
+	Err            error
 }
 
 // ReceiveSummary reúne o ciclo.
@@ -57,7 +60,11 @@ type ReceiveSummary struct {
 	// os arquivos, e não acioná-lo tornaria o ciclo uma varredura de pasta.
 	ClientInvoked bool
 	ExitCode      *int
-	Outcomes      []ReceiveOutcome
+	// LogDoCicloLido afirma que o log foi lido E traz linha desta execução. `false` é "não sei o que
+	// o cliente registrou", nunca "o cliente não registrou nada" — a distinção é o que impede o
+	// consumidor de represar pagamento com base numa ignorância disfarçada de conclusão.
+	LogDoCicloLido bool
+	Outcomes       []ReceiveOutcome
 	// LoggedButAbsent são nomes que o log diz ter recebido e que não estavam na pasta.
 	//
 	// Não viram desfecho — o agente não inventa arquivo a partir do log —, mas precisam aparecer:
@@ -85,18 +92,24 @@ func (a *Agent) ReceiveCycle(ctx context.Context) (ReceiveSummary, error) {
 
 	var summary ReceiveSummary
 
+	// O início da janela é marcado ANTES de acionar o cliente, e a ordem é o que dá sentido à
+	// janela: só assim toda linha que o cliente escrever nesta execução cai depois dela. Marcar
+	// depois deixaria de fora exatamente as linhas que se quer reconhecer.
+	inicioDoCiclo := a.cfg.Clock()
+
 	// PASSO 1 — acionar. Sem filtro: o `-f` restringe o que é ENVIADO (§6, p.14), e a recepção
 	// traz o que o banco tiver para este perfil.
 	exitCode, runErr := a.client.Run(ctx, stcp.ModeReceive, "")
 	summary.ClientInvoked = true
 	summary.ExitCode = exitCode
 
-	// PASSO 2 — o log do ciclo, que é a evidência de origem.
+	// PASSO 2 — o log DESTE ciclo, que é a evidência de origem.
 	//
 	// Falha ao ler o log NÃO aborta: o log é diagnóstico, e sem ele os arquivos continuam sendo
 	// depositados, apenas sem correlação. Abortar aqui descartaria arquivos do banco por causa de um
 	// arquivo de apoio.
-	records := a.receptionRecords()
+	records, logDoCicloLido := a.receptionRecords(inicioDoCiclo, a.cfg.Clock())
+	summary.LogDoCicloLido = logDoCicloLido
 
 	// PASSO 3 — listar a pasta de entrada.
 	names, err := a.sp.ListInbound()
@@ -118,14 +131,20 @@ func (a *Agent) ReceiveCycle(ctx context.Context) (ReceiveSummary, error) {
 
 	summary.Outcomes = make([]ReceiveOutcome, 0, len(names))
 	for _, name := range names {
-		summary.Outcomes = append(summary.Outcomes, a.receiveOne(ctx, name, records, runErr))
+		summary.Outcomes = append(summary.Outcomes, a.receiveOne(ctx, name, records, logDoCicloLido, runErr))
 	}
 	return summary, nil
 }
 
 // receiveOne trata UM arquivo.
-func (a *Agent) receiveOne(ctx context.Context, name string, records []stcp.Record, runErr error) ReceiveOutcome {
-	out := ReceiveOutcome{FileName: name}
+func (a *Agent) receiveOne(
+	ctx context.Context,
+	name string,
+	records []stcp.Record,
+	logDoCicloLido bool,
+	runErr error,
+) ReceiveOutcome {
+	out := ReceiveOutcome{FileName: name, LogDoCicloLido: logDoCicloLido}
 
 	// A guarda de fronteira vem ANTES de qualquer escrita, e antes até da leitura do conteúdo.
 	//
@@ -164,8 +183,21 @@ func (a *Agent) receiveOne(ctx context.Context, name string, records []stcp.Reco
 	if !out.Correlated {
 		// Erra-se para MAIS aqui, ao contrário da transmissão: descartar em silêncio um arquivo do
 		// banco é o desfecho que ninguém percebe. Ele entra assim mesmo, marcado.
-		detail = "arquivo encontrado na pasta de entrada SEM linha correspondente no log deste ciclo; " +
-			"depositado assim mesmo, com a origem declarada como não correlacionada"
+		//
+		// As duas frases são distintas porque as ações são distintas, e quem as lê é um operador às
+		// três da manhã: uma manda conferir o ARQUIVO, a outra manda conferir a INSTALAÇÃO. A versão
+		// anterior dizia "log deste ciclo" nos dois casos — afirmação que o código não sustentava
+		// quando o log deste ciclo sequer havia sido lido.
+		if logDoCicloLido {
+			detail = "arquivo encontrado na pasta de entrada SEM linha correspondente no log deste " +
+				"ciclo, que FOI lido; depositado assim mesmo, com a origem declarada como não " +
+				"correlacionada — o cliente não registrou tê-lo recebido nesta execução"
+		} else {
+			detail = "arquivo encontrado na pasta de entrada e depositado, mas o log DESTA execução " +
+				"não pôde ser lido (padrão sem correspondência, log ainda não escrito ou leitura que " +
+				"falhou); a ausência de correlação NÃO é indício sobre o arquivo — é sobre a " +
+				"configuração do log na instalação, e é ela que precisa ser conferida"
+		}
 	}
 
 	if found && entry.Estado == ledger.StateDone {
@@ -283,6 +315,7 @@ func (a *Agent) publishReception(
 			Sha256:         out.Sha256,
 			Chave:          out.StoredKey,
 			Correlacionado: out.Correlated,
+			LogDoCicloLido: out.LogDoCicloLido,
 			Duplicado:      out.Duplicate,
 		})
 
@@ -296,16 +329,39 @@ func (a *Agent) publishReception(
 	}
 }
 
-// receptionRecords lê e decodifica o log do ciclo.
+// clockSkewMargin alarga a janela do ciclo nas duas pontas.
+//
+// O carimbo do §12 tem resolução de SEGUNDO, e o agente marca o início do ciclo com resolução de
+// nanossegundo. Sem margem, uma linha escrita 300ms depois do início pode trazer o carimbo do
+// segundo anterior e cair fora da janela — rejeitando como "de outro ciclo" uma linha que é deste.
+// Um segundo cobre o truncamento; ampliar mais reabriria a porta para o log de ontem, que é o que a
+// janela existe para fechar.
+const clockSkewMargin = time.Second
+
+// receptionRecords lê o log e devolve SÓ as linhas deste ciclo, mais a afirmação de que o log do
+// ciclo foi efetivamente lido.
 //
 // Devolve nada quando não há log: o log é DIAGNÓSTICO, e a ausência dele não pode impedir que
 // arquivos do banco sejam depositados. O que se perde é a correlação, e isso o envelope declara.
-func (a *Agent) receptionRecords() []stcp.Record {
-	raw, err := a.sp.ReadTransferLog()
-	if err != nil || raw == "" {
-		return nil
+//
+// O segundo retorno é a diferença entre "não sei" e "sei que não tinha", e ele só é `true` quando as
+// DUAS condições valem: o arquivo de log foi lido, e ele contém pelo menos uma linha carimbada
+// dentro desta janela. A segunda condição é o que impede o modo de falha diário — o nome do log
+// começa por data (§7, p.15), então no primeiro ciclo do dia o padrão casa o log de ONTEM, e uma
+// leitura bem-sucedida de um log real não diz nada sobre o que acabou de acontecer.
+func (a *Agent) receptionRecords(from, to time.Time) ([]stcp.Record, bool) {
+	raw, read, err := a.sp.ReadTransferLog()
+	if err != nil || !read {
+		return nil, false
 	}
-	return stcp.ParseLog(raw)
+
+	doCiclo := stcp.WithinWindow(stcp.ParseLog(raw), from.Add(-clockSkewMargin), to.Add(clockSkewMargin))
+	// Log lido e sem NENHUMA linha deste ciclo é tratado como "não sei", e não como "sei que não
+	// tinha". É o caso do log de ontem, e também o do arquivo vazio: nos dois, o que o cliente
+	// registrou nesta execução continua desconhecido. Afirmar o contrário daria à ausência de
+	// correlação uma confiança que nada sustenta — e é sobre essa confiança que o consumidor decide
+	// represar pagamento.
+	return doCiclo, len(doCiclo) > 0
 }
 
 // receiveDuplicate trata a reaparição de um conteúdo já recebido.
@@ -347,6 +403,7 @@ func (a *Agent) receiveDuplicate(
 			Sha256:         out.Sha256,
 			Chave:          entry.Chave,
 			Correlacionado: out.Correlated,
+			LogDoCicloLido: out.LogDoCicloLido,
 			Duplicado:      true,
 			DuplicadoDe:    entry.Chave,
 		})

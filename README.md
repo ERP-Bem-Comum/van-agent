@@ -155,6 +155,20 @@ Na transmissão, registrar antes é o que impede pagar duas vezes. Aqui o risco 
 
 **O que não casa com o log entra assim mesmo**, marcado como não correlacionado. Erra-se para **mais** aqui, ao contrário da transmissão: descartar em silêncio um arquivo do banco é o desfecho que ninguém percebe.
 
+**A correlação é ancorada no tempo, e `correlacionado` sozinho não é interpretável.** Só entram as linhas cujo carimbo (§12, campo 1) cai na janela desta execução — marcada **antes** de acionar o cliente. Sem essa âncora, "o log deste ciclo" seria uma afirmação que o código não sustenta: o nome do log começa por data (§7, p.15), então o padrão casa o **mais recente**, e no primeiro ciclo do dia — antes de o cliente escrever o log novo — ele casa o log de **ontem**. Uma leitura bem-sucedida de um log real não diz nada sobre o que acabou de acontecer.
+
+Daí o par de campos no envelope:
+
+| `logDoCicloLido` | `correlacionado` | o que significa |
+| :-- | :-- | :-- |
+| `true` | `true` | o cliente registrou ter recebido este arquivo nesta execução |
+| `true` | `false` | o log desta execução foi lido e **não** trazia o arquivo — origem não registrada, caso a revisar |
+| `false` | `false` | o agente **não sabe**: o log desta execução não foi lido. Não é indício sobre o arquivo, e sim sobre a **configuração do log** na instalação |
+
+A terceira linha é a que existe para não ser confundida com a segunda. Um consumidor que represe por não-correlação sem olhar `logDoCicloLido` represaria todo retorno do primeiro ciclo do dia, diariamente, por um padrão de log mal configurado — e um sinal errado é pior que sinal nenhum, porque o consumidor obedece a ele.
+
+⚠️ O carimbo do log não traz zona: é a hora local da máquina que roda o cliente, e é assim que o agente o interpreta. Um erro de fuso aqui não desloca a janela para longe do log de ontem — desloca para longe do log de **hoje**.
+
 O agente **nunca abre CNAB** — o conteúdo atravessa cru, byte a byte.
 
 #### Idempotência da recepção

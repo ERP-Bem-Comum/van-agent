@@ -32,8 +32,14 @@ type Spool interface {
 	InOutbound(fileName string) (bool, error)
 	// InBackup reporta se o arquivo apareceu em BACKUP.
 	InBackup(fileName string) (bool, error)
-	// ReadTransferLog devolve o conteúdo do log posicional de transferências.
-	ReadTransferLog() (string, error)
+	// ReadTransferLog devolve o conteúdo do log posicional de transferências, e se ele chegou a ser
+	// lido.
+	//
+	// Os dois retornos existem porque conteúdo vazio tem DUAS causas que significam coisas opostas:
+	// nenhum arquivo casou o padrão (não se sabe nada) ou o log existe e está vazio. Colapsar as
+	// duas em `""` faria o agente publicar "sei que não havia linha" sobre um caso em que ele não
+	// leu log nenhum.
+	ReadTransferLog() (raw string, read bool, err error)
 	// ListInbound lista os arquivos que o cliente deixou na pasta de ENTRADA.
 	ListInbound() ([]string, error)
 	// ReadInbound lê um arquivo recebido, sem interpretá-lo. O agente NUNCA abre CNAB.
@@ -200,13 +206,18 @@ func (d *Dir) InBackup(fileName string) (bool, error) { return exists(d.cfg.Back
 // Devolve string vazia, sem erro, quando não há log: o log é DIAGNÓSTICO, e a ausência dele não
 // pode impedir a publicação de um desfecho que a evidência física já determinou. Falhar aqui
 // deixaria a remessa em estado desconhecido por causa de um arquivo de apoio.
-func (d *Dir) ReadTransferLog() (string, error) {
+//
+// O segundo retorno separa "nenhum arquivo casou o padrão" de "o arquivo existe e está vazio". As
+// duas produziam `""` e eram indistinguíveis, e a diferença decide o que o agente pode AFIRMAR: sem
+// arquivo, ele não leu log algum; com arquivo vazio, ele leu e não havia linha. Só a segunda
+// sustenta uma conclusão sobre o que o cliente registrou.
+func (d *Dir) ReadTransferLog() (string, bool, error) {
 	matches, err := filepath.Glob(filepath.Join(d.cfg.LogDir, d.cfg.TransferLogGlob))
 	if err != nil {
-		return "", fmt.Errorf("procurar log de transferências: %w", err)
+		return "", false, fmt.Errorf("procurar log de transferências: %w", err)
 	}
 	if len(matches) == 0 {
-		return "", nil
+		return "", false, nil
 	}
 	// Ordem lexicográfica decrescente: o nome do log documentado pelo fabricante começa por data
 	// no formato `YYYYMMDD` (§7, p.15), que ordena cronologicamente como texto.
@@ -214,9 +225,12 @@ func (d *Dir) ReadTransferLog() (string, error) {
 
 	raw, err := os.ReadFile(matches[0])
 	if err != nil {
-		return "", fmt.Errorf("ler log de transferências %q: %w", matches[0], err)
+		// Casou o padrão mas não foi lido: o segundo retorno é `false` porque ele afirma que o
+		// conteúdo do log é conhecido, e aqui não é. Saber que o arquivo existe não autoriza
+		// nenhuma conclusão sobre o que ele registra.
+		return "", false, fmt.Errorf("ler log de transferências %q: %w", matches[0], err)
 	}
-	return string(raw), nil
+	return string(raw), true, nil
 }
 
 // ListInbound lista os arquivos que o cliente deixou na pasta de ENTRADA.

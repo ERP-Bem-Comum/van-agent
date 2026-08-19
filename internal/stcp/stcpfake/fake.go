@@ -228,7 +228,11 @@ func (f *Fake) appendLog(lines []string) error {
 
 // line monta uma linha no layout posicional do §12 (p.30), com as dez larguras na ordem do manual.
 func (f *Fake) line(op, result, fileName string) string {
-	now := f.Now()
+	// O carimbo sai no fuso LOCAL porque é o que o cliente real faz: ele roda na máquina Windows e
+	// registra a hora do relógio dela, sem indicação de zona (§12, p.30). Formatar em UTC aqui
+	// deixaria o duplo mais fiel ao relógio injetado do que ao cliente que ele encena — e esconderia
+	// justamente o erro de fuso que a correlação por janela de tempo pode cometer.
+	now := f.Now().In(time.Local)
 	var b strings.Builder
 	b.WriteString(now.Format("20060102150405")) // 1 · 14 · N
 	b.WriteString(op)                           // 2 ·  4 · N
