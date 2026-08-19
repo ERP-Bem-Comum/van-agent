@@ -91,16 +91,6 @@ jobs:
   integracao:
     name: adapter de object storage contra S3-compatível
     runs-on: ubuntu-latest
-    services:
-      # MinIO fala o mesmo protocolo que o S3, mudando só o endereçamento das chaves — é o que torna
-      # esta prova possível sem bucket de verdade e sem credencial de nuvem alguma.
-      minio:
-        image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-        env:
-          MINIO_ROOT_USER: chave-de-ci
-          MINIO_ROOT_PASSWORD: segredo-de-ci-min-8-chars
-        ports:
-          - 9000:9000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -109,10 +99,25 @@ jobs:
           go-version-file: go.mod
           check-latest: true
 
+      - name: subir o MinIO
+        # ⚠️ NÃO dá para usar `services:` aqui, e a razão não é preferência: a imagem do MinIO exige
+        # o comando `server /data`, e `services` só aceita a imagem e flags do docker — nunca o
+        # comando. Declarado como service, o container sobe sem virar servidor, nada escuta na porta,
+        # e o job falha com um timeout que não diz nada sobre a causa.
+        #
+        # MinIO fala o mesmo protocolo que o S3, mudando só o endereçamento das chaves — é o que
+        # torna esta prova possível sem bucket de verdade e sem credencial de nuvem alguma.
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=chave-de-ci \
+            -e MINIO_ROOT_PASSWORD=segredo-de-ci-min-8-chars \
+            minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data
+
       - name: esperar o MinIO responder
-        # O healthcheck fica AQUI, e não em `options` do service: a imagem não garante ter uma
-        # ferramenta de health própria, e um healthcheck que falha por falta de binário derruba o
-        # job com um erro que não tem nada a ver com o código.
+        # A espera fica num step, e não num healthcheck do container: a imagem não garante ter uma
+        # ferramenta de health própria, e um healthcheck que falha por falta de binário derruba o job
+        # com um erro que não tem nada a ver com o código. O runner tem `curl`.
         run: |
           for i in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/live; then
@@ -122,6 +127,7 @@ jobs:
             sleep 2
           done
           echo "::error::MinIO não respondeu em 60s"
+          docker logs minio || true
           exit 1
 
       - name: suíte com endpoint configurado
