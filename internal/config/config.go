@@ -149,6 +149,12 @@ func Load() (Config, error) {
 			OutboundDir: lookup(agentPrefix, "STCP_OUTBOUND_DIR", &missing),
 			BackupDir:   lookup(agentPrefix, "STCP_BACKUP_DIR", &missing),
 			LogDir:      lookup(agentPrefix, "STCP_LOG_DIR", &missing),
+			// As pastas da recepção são OPCIONAIS na leitura e cobradas pelo ciclo que as usa: uma
+			// instalação que ainda só transmite precisa continuar bootando, e um boot que falhasse
+			// por causa de uma pasta que o modo em execução não toca transformaria trabalho pendente
+			// em parada de produção.
+			InboundDir:  os.Getenv(agentPrefix + "STCP_INBOUND_DIR"),
+			ReceivedDir: os.Getenv(agentPrefix + "STCP_RECEIVED_DIR"),
 			// O nome do arquivo do log POSICIONAL não é documentado pelo manual v5.3 — ele descreve
 			// o layout (§12, p.30) e o diretório, mas não o nome. Fica configurável, com um padrão
 			// que precisa ser confirmado contra a instalação real.

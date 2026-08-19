@@ -24,7 +24,7 @@ Issue: [core-api#735](https://github.com/ERP-Bem-Comum/core-api/issues/735).
 | **CA4** — execução interrompida vai para revisão humana, **nunca** retransmite | ✅         |
 | **CA7** — filtro de nomenclatura, inclusive contra arquivo intruso na pasta    | ✅         |
 | **CA8** — credencial por role da instância, nada em disco                      | ✅¹        |
-| **CA5** — ciclo de recepção                                                    | ⬜ [#3][i3] |
+| **CA5** — ciclo de recepção                                                    | ✅         |
 | **CA6** — erro de identidade não gera retentativa cega                         | ⬜ [#3][i3] |
 
 ¹ do lado do código: sem chave informada, a resolução cai na cadeia de provedores, e nada de credencial existe em disco ou em variável. A role **atribuída à instância** é infraestrutura, e não vive neste repositório.
@@ -130,6 +130,33 @@ go test ./... -count=1
 
 Dois testes acordam com isso: `TestCA7_AdapterRealExercitaOsQuatroMetodos` (os quatro métodos da interface) e `TestCA1_CicloCompletoContraObjectStorageReal` (o ciclo inteiro — remessa depositada, transmitida pelo duplo do cliente, status publicado e objeto movido, tudo no bucket real).
 
+### Modo recepção
+
+```bash
+van-agent -modo=recepcao
+```
+
+Traz o que o banco enviou e o deposita no prefixo de retorno. **É o único ciclo que não paga ninguém se der errado** — transmitir errado tira dinheiro da conta de alguém, receber errado não. Enquanto não houver ambiente de homologação, é por ele que se começa a exercitar qualquer instalação real.
+
+A ordem é **inversa** à da transmissão, e a inversão é deliberada:
+
+```
+1. acionar o cliente          (modo R)
+2. ler o log do ciclo         ← a evidência de origem
+3. listar a pasta de ENTRADA
+4. por arquivo: depositar no bucket, DEPOIS registrar
+5. publicar o envelope
+6. tirar o arquivo da pasta de entrada
+```
+
+Na transmissão, registrar antes é o que impede pagar duas vezes. Aqui o risco é o oposto — **perder evidência de um pagamento** —, e registrar antes de depositar abriria exatamente essa janela: uma queda entre o registro e o depósito faria o ciclo seguinte reconhecer o conteúdo como já recebido e nunca depositá-lo.
+
+**Proveniência.** A caixa é do **convênio**, não da nossa remessa: chegam arquivos de lotes que não são nossos. O critério de origem é o **log do ciclo** — as linhas de recepção dizem o que aquela execução recebeu, e vêm do cliente do banco, não de um palpite sobre o nome do arquivo (que é atribuído pelo banco, não por nós). O envelope carrega nome, **SHA-256 do conteúdo**, as linhas cruas que correlacionam e o carimbo, para que o core-api possa aplicar a regra dele: só processa objeto que tenha envelope correspondente; o que aparecer sem envelope vai para quarentena visível.
+
+**O que não casa com o log entra assim mesmo**, marcado como não correlacionado. Erra-se para **mais** aqui, ao contrário da transmissão: descartar em silêncio um arquivo do banco é o desfecho que ninguém percebe.
+
+O agente **nunca abre CNAB** — o conteúdo atravessa cru, byte a byte.
+
 ### Modo transmissão
 
 ```bash
@@ -160,6 +187,7 @@ Tudo por ambiente; nenhum default aponta para instalação real. São **dois con
 | `VAN_AGENT_NAME_PATTERN`                                   |     ✅      | precisa ancorar o nome inteiro (`^…$`) |
 | `VAN_AGENT_STCP_EXE` · `_INI` · `_PROFILE`                 |     ✅      | instalação do cliente                  |
 | `VAN_AGENT_STCP_OUTBOUND_DIR` · `_BACKUP_DIR` · `_LOG_DIR` |     ✅      | pastas do cliente                      |
+| `VAN_AGENT_STCP_INBOUND_DIR` · `_RECEIVED_DIR`             |   recepção  | pasta de ENTRADA e pasta de arquivados; cobradas **só** no `-modo=recepcao`, para que uma instalação que ainda só transmite continue bootando |
 | `VAN_AGENT_NAME_MAX_LENGTH`                                |             | teto de comprimento do nome; **ausente ⇒ sem trava**. Ver abaixo |
 | `VAN_AGENT_STCP_RETRIES` · `_RETRY_INTERVAL_SECONDS`       |             | `-r` e `-t` (§6, p.14)                 |
 | `VAN_AGENT_STCP_TRANSFER_LOG_GLOB`                         |             | ver pendências                         |

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Spool é o que o ciclo precisa das pastas da instalação.
@@ -33,6 +34,20 @@ type Spool interface {
 	InBackup(fileName string) (bool, error)
 	// ReadTransferLog devolve o conteúdo do log posicional de transferências.
 	ReadTransferLog() (string, error)
+	// ListInbound lista os arquivos que o cliente deixou na pasta de ENTRADA.
+	ListInbound() ([]string, error)
+	// ReadInbound lê um arquivo recebido, sem interpretá-lo. O agente NUNCA abre CNAB.
+	ReadInbound(fileName string) ([]byte, error)
+	// Archive tira o arquivo da pasta de ENTRADA depois de ele estar no bucket.
+	//
+	// Sem isto o mesmo arquivo seria reprocessado a cada passada — o agente roda a cada 5 minutos —
+	// e "reapareceu" deixaria de ter significado: não haveria como distinguir o banco reenviando um
+	// arquivo de ninguém ter tirado o antigo da pasta.
+	//
+	// ⚠️ Mover na MÁQUINA não é apagar no BUCKET. A regra do ADR-0061 §1 é sobre o bucket, e é por
+	// isso que `bucket.Store` não tem remoção. Aqui o conteúdo já está no bucket antes de o arquivo
+	// sair da pasta — a ordem não é negociável.
+	Archive(fileName string) error
 }
 
 // Config descreve as pastas da instalação. Todos os caminhos entram por ambiente: eles identificam
@@ -44,6 +59,15 @@ type Config struct {
 	BackupDir string
 	// LogDir é a pasta de LOG.
 	LogDir string
+	// InboundDir é a pasta onde o cliente deposita o que RECEBE do banco.
+	//
+	// Vazia é aceitável: os modos de transmissão e ensaio não precisam dela, e exigi-la faria o boot
+	// deles falhar numa instalação que ainda não configurou recepção. Quem cobra é o ciclo de
+	// recepção, no boot dele.
+	InboundDir string
+	// ReceivedDir é para onde o arquivo recebido vai depois de estar no bucket. Mesma regra de
+	// obrigatoriedade da pasta de entrada.
+	ReceivedDir string
 	// TransferLogGlob casa o arquivo do log POSICIONAL de transferências dentro de LogDir.
 	//
 	// ⚠️ PENDÊNCIA CONHECIDA: o manual descreve o LAYOUT do log posicional (§12, p.30) e diz que
@@ -65,6 +89,25 @@ func (c Config) Validate() error {
 		return errors.New("pasta de log do cliente STCP não configurada")
 	case c.TransferLogGlob == "":
 		return errors.New("padrão do log de transferências não configurado")
+	}
+	return nil
+}
+
+// ValidateReception cobra o que SÓ o ciclo de recepção precisa.
+//
+// Separada de `Validate` de propósito: uma instalação que ainda não configurou recepção precisa
+// continuar transmitindo, e um boot que falhasse por causa de uma pasta que o modo em execução não
+// usa transformaria trabalho pendente em parada de produção.
+func (c Config) ValidateReception() error {
+	switch {
+	case c.InboundDir == "":
+		return errors.New("pasta de entrada do cliente STCP não configurada")
+	case c.ReceivedDir == "":
+		return errors.New("pasta de arquivados da recepção não configurada")
+	case c.InboundDir == c.ReceivedDir:
+		// Fossem a mesma, arquivar não tiraria o arquivo da fila de entrada e cada passada o
+		// reprocessaria — a cada cinco minutos, para sempre.
+		return errors.New("pasta de entrada e pasta de arquivados não podem ser a mesma")
 	}
 	return nil
 }
@@ -174,4 +217,75 @@ func (d *Dir) ReadTransferLog() (string, error) {
 		return "", fmt.Errorf("ler log de transferências %q: %w", matches[0], err)
 	}
 	return string(raw), nil
+}
+
+// ListInbound lista os arquivos que o cliente deixou na pasta de ENTRADA.
+//
+// Diretórios são ignorados, e a ordem é estável pelo mesmo motivo do duplo do bucket: sem ela, dois
+// arquivos recebidos no mesmo ciclo seriam tratados em ordem de sistema de arquivos, e uma
+// investigação sobre qual foi processado primeiro não se reproduziria.
+func (d *Dir) ListInbound() ([]string, error) {
+	if d.cfg.InboundDir == "" {
+		return nil, errors.New("pasta de entrada do cliente STCP não configurada")
+	}
+	entries, err := os.ReadDir(d.cfg.InboundDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Pasta ausente NÃO é ciclo vazio: uma instalação com a pasta errada configurada
+			// reportaria "nada a receber" para sempre, e ninguém veria os arquivos se acumulando.
+			return nil, fmt.Errorf("pasta de entrada %q não existe: %w", d.cfg.InboundDir, err)
+		}
+		return nil, fmt.Errorf("ler pasta de entrada: %w", err)
+	}
+
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// ReadInbound lê um arquivo recebido. O conteúdo sai daqui CRU — o agente nunca abre CNAB.
+func (d *Dir) ReadInbound(fileName string) ([]byte, error) {
+	path, err := safeJoin(d.cfg.InboundDir, fileName)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("ler arquivo recebido %q: %w", fileName, err)
+	}
+	return raw, nil
+}
+
+// Archive tira o arquivo da pasta de ENTRADA.
+//
+// Só é chamado depois de o conteúdo estar no bucket. Se falhar, o arquivo fica onde está e o ciclo
+// seguinte o encontra de novo — ruído visível, que é o desfecho certo comparado a perder a evidência
+// de um pagamento.
+func (d *Dir) Archive(fileName string) error {
+	origem, err := safeJoin(d.cfg.InboundDir, fileName)
+	if err != nil {
+		return err
+	}
+	destino, err := safeJoin(d.cfg.ReceivedDir, fileName)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(d.cfg.ReceivedDir, 0o750); err != nil {
+		return fmt.Errorf("preparar pasta de arquivados: %w", err)
+	}
+	// Um homônimo já arquivado NÃO é sobrescrito: ele pode ter conteúdo diferente, e sobrescrever
+	// destruiria a única cópia local de um retorno. O carimbo desempata.
+	if _, err := os.Stat(destino); err == nil {
+		destino = destino + ".recebido-" + time.Now().UTC().Format("20060102T150405Z")
+	}
+	if err := os.Rename(origem, destino); err != nil {
+		return fmt.Errorf("arquivar %q: %w", fileName, err)
+	}
+	return nil
 }
