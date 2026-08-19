@@ -103,6 +103,27 @@
           "correlacionado": false
         }
       }
+    },
+    {
+      "nome": "recepção duplicada — mesmo conteúdo já recebido",
+      "tipo": "reception",
+      "contaComoTransmissao": false,
+      "chave": "status/recepcao-20260818T120000Z-PAG_000000.20260818110000_0001.RET.json",
+      "envelope": {
+        "arquivo": "PAG_000000.20260818110000_0001.RET",
+        "executadoEm": "2026-08-18T12:00:00Z",
+        "situacao": "recepcao",
+        "detalhe": "conteúdo idêntico a uma recepção anterior (mesmo sha256), já depositado em \"retorno/PAG_000000.20260818110000_0001.RET\" em 2026-08-18T11:00:00Z; o objeto anterior NÃO foi sobrescrito e nada foi depositado de novo",
+        "exitCode": null,
+        "logTransferencia": [],
+        "recepcao": {
+          "sha256": "7c0d65065ec8742d751a41222449f02844d7873a5b28ae6a0b6613c573a56cf1",
+          "chave": "retorno/PAG_000000.20260818110000_0001.RET",
+          "correlacionado": true,
+          "duplicado": true,
+          "duplicadoDe": "retorno/PAG_000000.20260818110000_0001.RET"
+        }
+      }
     }
   ]
 }

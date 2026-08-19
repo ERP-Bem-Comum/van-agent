@@ -168,6 +168,20 @@ func (a *Agent) receiveOne(ctx context.Context, name string, records []stcp.Reco
 			"depositado assim mesmo, com a origem declarada como não correlacionada"
 	}
 
+	if found && entry.Estado == ledger.StateDone {
+		// CA1/CA3 — este CONTEÚDO já foi recebido antes.
+		//
+		// Reconhecido pelo HASH, nunca pelo nome: o nome é atribuído pelo banco, o mesmo arquivo
+		// pode voltar com nome diferente, e nomes iguais podem trazer conteúdo diferente. Deduplicar
+		// por nome produziria as duas falhas opostas — descartar arquivo novo e aceitar reenvio como
+		// novidade.
+		//
+		// O objeto anterior NÃO é tocado. Sobrescrever um arquivo de retorno destrói evidência de um
+		// pagamento, que é o pior lugar possível para perder registro; e regravar o mesmo conteúdo
+		// sob outra chave só produziria uma cópia idêntica que ninguém sabe ligar à original.
+		return a.receiveDuplicate(ctx, out, entry, linhas, name)
+	}
+
 	if found && entry.Estado == ledger.StateIntent {
 		// CA5 — a mesma disciplina da transmissão: interrompido não vira sucesso presumido.
 		//
@@ -292,4 +306,67 @@ func (a *Agent) receptionRecords() []stcp.Record {
 		return nil
 	}
 	return stcp.ParseLog(raw)
+}
+
+// receiveDuplicate trata a reaparição de um conteúdo já recebido.
+//
+// Publica, e não silencia, porque o consumidor precisa saber que o banco reenviou algo: a ausência
+// de envelope já significa "rodou e não havia nada a receber", e usar o mesmo silêncio para duas
+// situações diferentes apagaria a única pista de que houve reenvio.
+//
+// A chave do envelope é distinta da anterior — o carimbo e o nome a compõem —, então o envelope da
+// primeira recepção continua legível. É a mesma forma que a transmissão já usa para a tentativa
+// duplicada, e o consumidor já sabe classificá-la.
+func (a *Agent) receiveDuplicate(
+	ctx context.Context,
+	out ReceiveOutcome,
+	entry ledger.ReceptionEntry,
+	logLines []string,
+	name string,
+) ReceiveOutcome {
+	out.Duplicate = true
+	out.Situation = envelope.Reception
+	out.StatusKey = envelope.ReceptionKey(name, a.cfg.Clock())
+
+	detail := fmt.Sprintf(
+		"conteúdo idêntico a uma recepção anterior (mesmo sha256), já depositado em %q em %s; "+
+			"o objeto anterior NÃO foi sobrescrito e nada foi depositado de novo",
+		entry.Chave, entry.ConcluidoEm)
+	if entry.Arquivo != name {
+		// O caso que só o hash pega: mesmo arquivo, nome diferente. Registrar os dois nomes é o que
+		// permite a quem investiga entender por que um arquivo "novo" não gerou objeto novo.
+		detail = fmt.Sprintf(
+			"conteúdo idêntico a uma recepção anterior (mesmo sha256), recebida com o nome %q e já "+
+				"depositada em %q em %s; o nome mudou, o conteúdo não — o objeto anterior NÃO foi "+
+				"sobrescrito e nada foi depositado de novo",
+			entry.Arquivo, entry.Chave, entry.ConcluidoEm)
+	}
+
+	env := envelope.NewReception(name, a.cfg.Clock(), out.Situation, detail, nil, logLines,
+		envelope.ReceptionInfo{
+			Sha256:         out.Sha256,
+			Chave:          entry.Chave,
+			Correlacionado: out.Correlated,
+			Duplicado:      true,
+			DuplicadoDe:    entry.Chave,
+		})
+
+	body, err := envelope.Marshal(env)
+	if err != nil {
+		out.Err = errors.Join(out.Err, err)
+		return out
+	}
+	if err := a.store.Put(ctx, out.StatusKey, body); err != nil {
+		out.Err = errors.Join(out.Err, fmt.Errorf("publicar recepção duplicada em %q: %w", out.StatusKey, err))
+		return out
+	}
+
+	// Arquiva do mesmo jeito: deixar na entrada faria o duplicado ser republicado a cada passada, e
+	// o ruído esconderia o caso real.
+	if err := a.sp.Archive(name); err != nil {
+		out.Err = errors.Join(out.Err, err)
+	} else {
+		out.Archived = true
+	}
+	return out
 }

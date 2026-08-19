@@ -157,6 +157,22 @@ Na transmissão, registrar antes é o que impede pagar duas vezes. Aqui o risco 
 
 O agente **nunca abre CNAB** — o conteúdo atravessa cru, byte a byte.
 
+#### Idempotência da recepção
+
+**Nunca sobrescrever. Objeto distinto. Deduplicar por hash de conteúdo, não por nome.**
+
+Sobrescrever um arquivo de retorno destrói evidência de um pagamento — o pior lugar possível para perder registro. E o nome não serve como identificador: quem o atribui é o banco, o mesmo arquivo pode voltar com nome diferente, e nomes iguais podem trazer conteúdo diferente. Deduplicar por nome produziria as **duas falhas opostas** — descartar arquivo novo e aceitar reenvio como novidade.
+
+| O que chega                         | O que acontece                                                                            |
+| :---------------------------------- | :---------------------------------------------------------------------------------------- |
+| conteúdo **novo**                   | depositado em `retorno/<nome>`, envelope de recepção                                       |
+| **mesmo conteúdo** (qualquer nome)  | nada é depositado; envelope declara `duplicado` e aponta `duplicadoDe` para a chave anterior |
+| **mesmo nome**, conteúdo diferente  | é arquivo **novo**: vai para uma chave desempatada por carimbo, e os dois ficam recuperáveis |
+
+O índice vive em diretório **próprio** dentro de `VAN_AGENT_LEDGER_DIR` (`recepcao/`): um indexa nome de arquivo de saída, o outro hash de conteúdo de entrada, e uma pasta separada torna a colisão impossível em vez de improvável.
+
+> A idempotência que protege o **negócio** é a do efeito, e ela vive no core-api (chave de negócio: NSA + "Seu Número"). O que o agente garante é outra coisa, e é o que ele pode garantir: que **não perde e não confunde** arquivos. Ele nunca abre CNAB e não conhece chave de negócio alguma.
+
 ### Modo transmissão
 
 ```bash
