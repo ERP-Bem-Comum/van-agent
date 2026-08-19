@@ -189,3 +189,46 @@ func SendOutcomeFor(records []Record, fileName string) SendOutcome {
 	}
 	return out
 }
+
+// ReceptionLinesFor devolve as linhas de RECEPÇÃO daquele arquivo.
+//
+// A correlação por linha de log é o filtro mais forte disponível, e a razão é a origem: quem
+// escreve essas linhas é o cliente do banco, não um palpite nosso sobre o nome do arquivo — que é
+// atribuído pelo banco, não por nós. A caixa é do CONVÊNIO, e chegam arquivos de lotes que não são
+// nossos; sem um critério vindo do próprio cliente, não haveria como dizer o que aquela execução
+// recebeu.
+//
+// Só as operações de recepção entram (§12, p.30). Uma linha de TRANSMISSÃO do mesmo nome
+// correlacionaria o arquivo errado — e um retorno tratado como remessa é o tipo de confusão que
+// aparece semanas depois.
+func ReceptionLinesFor(records []Record, fileName string) []Record {
+	out := make([]Record, 0, len(records))
+	for _, r := range FilterByFile(records, fileName) {
+		if r.Op == OpReceiveStart || r.Op == OpReceiveEnd {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// ReceivedFileNames lista os nomes que aparecem em linhas de recepção, sem repetir.
+//
+// Serve ao caso inverso do `ReceptionLinesFor`: o log diz que um arquivo foi recebido e ele NÃO
+// está na pasta. É informação de diagnóstico — o agente não inventa arquivo a partir do log —, mas
+// precisa aparecer, porque um arquivo que o cliente diz ter recebido e sumiu antes de o agente
+// olhar é exatamente o que ninguém percebe.
+func ReceivedFileNames(records []Record) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range records {
+		if r.Op != OpReceiveStart && r.Op != OpReceiveEnd {
+			continue
+		}
+		if r.FileName == "" || seen[r.FileName] {
+			continue
+		}
+		seen[r.FileName] = true
+		out = append(out, r.FileName)
+	}
+	return out
+}

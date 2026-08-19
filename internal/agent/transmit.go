@@ -84,14 +84,33 @@ type Agent struct {
 	client stcp.Client
 	sp     spool.Spool
 	cfg    Config
+	// reception é o índice do que já foi recebido. Nil enquanto o ciclo de recepção não for usado —
+	// e o ciclo recusa rodar sem ele, em vez de operar sem memória do que já chegou.
+	reception ledger.ReceptionIndex
+}
+
+// Option ajusta o agente na construção.
+//
+// O ciclo de recepção entra por opção, e não por parâmetro de `New`, porque ele é OPCIONAL na
+// instalação: uma máquina configurada só para transmitir precisa continuar montando o agente sem
+// declarar um índice que não vai usar.
+type Option func(*Agent)
+
+// WithReceptionIndex liga o índice de recepção.
+func WithReceptionIndex(idx ledger.ReceptionIndex) Option {
+	return func(a *Agent) { a.reception = idx }
 }
 
 // New monta o agente.
-func New(store bucket.Store, led ledger.Ledger, client stcp.Client, sp spool.Spool, cfg Config) (*Agent, error) {
+func New(store bucket.Store, led ledger.Ledger, client stcp.Client, sp spool.Spool, cfg Config, opts ...Option) (*Agent, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Agent{store: store, led: led, client: client, sp: sp, cfg: cfg}, nil
+	a := &Agent{store: store, led: led, client: client, sp: sp, cfg: cfg}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
 // Outcome é o que aconteceu com UM objeto. `ClientInvoked` existe para que o critério de aceite de

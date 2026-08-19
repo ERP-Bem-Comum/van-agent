@@ -1,6 +1,8 @@
 package envelope_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -62,9 +64,24 @@ func logLine(op, result, fileName string) string {
 		pad(fileName, 256) + pad("", 128)
 }
 
+// O nome do arquivo de RETORNO segue a convenção do banco, não a nossa: quem o atribui é ele. As
+// duas nomenclaturas convivem neste arquivo de propósito.
+const returnName = "PAG_000000.20260818110000_0001.RET"
+
+// returnContent é o conteúdo fictício cujo hash aparece no golden. Ele existe para que o hash seja
+// VERIFICÁVEL — um valor hexadecimal digitado à mão não provaria que o produtor calcula o que o
+// contrato publica.
+const returnContent = "0372345...CONTEUDO CNAB DE RETORNO FICTICIO..."
+
+func returnSha256() string {
+	sum := sha256.Sum256([]byte(returnContent))
+	return hex.EncodeToString(sum[:])
+}
+
 func buildGolden() goldenFile {
 	at := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	name := "PAG_000000.20260818120000_0001.REM"
+	returnSum := returnSha256()
 
 	return goldenFile{
 		Descricao: "Contrato do prefixo status/ da VAN. Produzido pelo van-agent, consumido pelo core-api " +
@@ -120,14 +137,40 @@ func buildGolden() goldenFile {
 					nil, nil),
 			},
 			{
+				// O caso que era ASPIRACIONAL: o contrato publicava um envelope de recepção que o
+				// produtor não produzia. A partir daqui ele é gerado pelo mesmo construtor que o
+				// ciclo usa.
 				Nome:                 "ciclo de recepção com arquivo recebido",
 				Tipo:                 "reception",
 				ContaComoTransmissao: false,
-				Chave:                envelope.ReceptionKey(at),
-				Envelope: envelope.New("PAG_000000.20260818110000_0001.RET", at, envelope.Reception,
-					"1 arquivo recebido do banco e enviado ao prefixo de retorno",
+				Chave:                envelope.ReceptionKey(returnName, at),
+				Envelope: envelope.NewReception(returnName, at, envelope.Reception,
+					"arquivo recebido do banco e depositado no prefixo de retorno",
 					intPtr(0),
-					[]string{logLine("0007", "000000", "PAG_000000.20260818110000_0001.RET")}),
+					[]string{logLine("0007", "000000", returnName)},
+					envelope.ReceptionInfo{
+						Sha256:         returnSum,
+						Chave:          "retorno/" + returnName,
+						Correlacionado: true,
+					}),
+			},
+			{
+				// A caixa é do CONVÊNIO: chegam arquivos de lotes que não são nossos, e nem tudo
+				// casa com o log do ciclo. O que não casa entra ASSIM MESMO, declarado — descartar
+				// em silêncio um arquivo do banco é o desfecho que ninguém percebe.
+				Nome:                 "recepção sem correlação com o log do ciclo",
+				Tipo:                 "reception",
+				ContaComoTransmissao: false,
+				Chave:                envelope.ReceptionKey(returnName, at),
+				Envelope: envelope.NewReception(returnName, at, envelope.Reception,
+					"arquivo encontrado na pasta de entrada SEM linha correspondente no log deste ciclo; "+
+						"depositado assim mesmo, com a origem declarada como não correlacionada",
+					intPtr(0), nil,
+					envelope.ReceptionInfo{
+						Sha256:         returnSum,
+						Chave:          "retorno/" + returnName,
+						Correlacionado: false,
+					}),
 			},
 		},
 	}
@@ -229,5 +272,60 @@ func TestValidNameRecusaOQueProduziriaChaveAmbigua(t *testing.T) {
 func TestValidNameAceitaONomeDeRemessa(t *testing.T) {
 	if err := envelope.ValidName("PAG_000000.20260818120000_0001.REM"); err != nil {
 		t.Errorf("nome de remessa legítimo foi recusado: %v", err)
+	}
+}
+
+// O campo de recepção NÃO pode aparecer em envelope de remessa.
+//
+// O `omitempty` é o que mantém os envelopes de remessa byte a byte iguais aos que o consumidor já
+// aceita — a adição fica contida no único caso que precisava dela. Sem ele, todo envelope de
+// transmissão passaria a carregar um `"recepcao": null`, e um contrato que muda para todo mundo por
+// causa de um caso é exatamente o que o golden existe para pegar.
+func TestEnvelopeDeRemessaNaoCarregaOCampoDeRecepcao(t *testing.T) {
+	env := envelope.New("PAG_000000_000001.REM", time.Now(), envelope.Transmitted, "d", nil, nil)
+
+	raw, err := envelope.Marshal(env)
+	if err != nil {
+		t.Fatalf("serializar: %v", err)
+	}
+	if strings.Contains(string(raw), "recepcao") {
+		t.Errorf("envelope de remessa carregou o campo de recepção:\n%s", raw)
+	}
+}
+
+// E o inverso: o envelope de recepção precisa carregar o hash, senão o consumidor teria de reabrir
+// o objeto para saber o que recebeu — que é exatamente o que o campo existe para evitar.
+func TestEnvelopeDeRecepcaoCarregaOHashDoConteudo(t *testing.T) {
+	env := envelope.NewReception(returnName, time.Now(), envelope.Reception, "d", nil, nil,
+		envelope.ReceptionInfo{Sha256: returnSha256(), Chave: "retorno/" + returnName, Correlacionado: true})
+
+	raw, err := envelope.Marshal(env)
+	if err != nil {
+		t.Fatalf("serializar: %v", err)
+	}
+	if !strings.Contains(string(raw), returnSha256()) {
+		t.Errorf("o envelope de recepção precisa carregar o sha256 do conteúdo:\n%s", raw)
+	}
+	if env.LogTransferencia == nil {
+		t.Error("logTransferencia nil serializa como null e faz o consumidor recusar o envelope inteiro")
+	}
+}
+
+// A chave precisa distinguir dois arquivos recebidos no MESMO instante. Com o carimbo sozinho, o
+// segundo apagaria a evidência do primeiro.
+func TestChaveDeRecepcaoDistingueArquivosDoMesmoCiclo(t *testing.T) {
+	at := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+
+	primeira := envelope.ReceptionKey("A.RET", at)
+	segunda := envelope.ReceptionKey("B.RET", at)
+
+	if primeira == segunda {
+		t.Fatal("dois arquivos recebidos no mesmo instante colidiriam na mesma chave")
+	}
+	// E as duas continuam classificáveis como recepção pelo consumidor, que procura o prefixo.
+	for _, k := range []string{primeira, segunda} {
+		if !strings.HasPrefix(k, envelope.StatusPrefix+"recepcao-") {
+			t.Errorf("chave %q perdeu o prefixo que o consumidor usa para classificá-la", k)
+		}
 	}
 }

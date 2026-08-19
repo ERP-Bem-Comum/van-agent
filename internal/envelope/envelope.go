@@ -73,6 +73,41 @@ type Envelope struct {
 	Detalhe          string    `json:"detalhe"`
 	ExitCode         *int      `json:"exitCode"`
 	LogTransferencia []string  `json:"logTransferencia"`
+	// Recepcao só existe em envelope de recepção, e é OMITIDO nos demais.
+	//
+	// O `omitempty` não é economia de bytes: ele é o que faz os envelopes de remessa continuarem
+	// byte a byte idênticos aos que o consumidor já aceita. A adição fica contida no único caso que
+	// precisava dela, e o resto do contrato não se mexe.
+	Recepcao *ReceptionInfo `json:"recepcao,omitempty"`
+}
+
+// ReceptionInfo é a proveniência de um arquivo recebido do banco.
+//
+// Ela existe porque a caixa é do CONVÊNIO, não da nossa remessa: chegam arquivos de lotes que não
+// são nossos. A regra que o core-api vai aplicar é "só processa objeto que tenha envelope de
+// recepção correspondente", e o que aparecer sem envelope vai para quarentena visível — nem
+// processado, nem descartado em silêncio. Para isso ele precisa saber, sem reabrir o objeto, o que
+// foi recebido, com que conteúdo e com que evidência.
+type ReceptionInfo struct {
+	// Sha256 é o hash do CONTEÚDO, em hexadecimal minúsculo.
+	//
+	// É por ele que se separa "o banco reenviou o mesmo arquivo" de "chegou arquivo novo com nome
+	// homônimo". O NOME não serve: quem o atribui é o banco, e deduplicar por nome produziria as
+	// duas falhas opostas — descartar arquivo novo e aceitar reenvio como novidade.
+	Sha256 string `json:"sha256"`
+	// Chave é onde o objeto foi depositado, para que o consumidor não precise adivinhar.
+	Chave string `json:"chave"`
+	// Correlacionado diz se o arquivo casou com alguma linha de recepção do log DESTE ciclo.
+	//
+	// `false` NÃO significa "não é confiável": significa que o agente não conseguiu provar a origem
+	// pelo log, e mesmo assim depositou. Erra-se para mais aqui: descartar em silêncio um arquivo do
+	// banco é o desfecho que ninguém percebe.
+	Correlacionado bool `json:"correlacionado"`
+	// Duplicado marca a recepção de um conteúdo que já havia sido recebido antes.
+	Duplicado bool `json:"duplicado,omitempty"`
+	// DuplicadoDe é a chave da recepção anterior com o mesmo conteúdo — o que permite ao consumidor
+	// ligar as duas sem reabrir objeto nenhum.
+	DuplicadoDe string `json:"duplicadoDe,omitempty"`
 }
 
 // New monta um envelope com os invariantes já garantidos, e é o único construtor exportado de
@@ -93,6 +128,25 @@ func New(fileName string, at time.Time, situation Situation, detail string, exit
 		ExitCode:         exitCode,
 		LogTransferencia: lines,
 	}
+}
+
+// NewReception monta o envelope de um arquivo recebido.
+//
+// Construtor próprio pelo mesmo motivo de `New` ser o único exportado: montar a struct na mão
+// deixaria `LogTransferencia` nil (que serializa como `null` e faz o consumidor recusar o envelope
+// inteiro) ou `Recepcao` nil num envelope que precisa dele.
+func NewReception(
+	fileName string,
+	at time.Time,
+	situation Situation,
+	detail string,
+	exitCode *int,
+	logLines []string,
+	reception ReceptionInfo,
+) Envelope {
+	env := New(fileName, at, situation, detail, exitCode, logLines)
+	env.Recepcao = &reception
+	return env
 }
 
 // Marshal serializa em UTF-8 sem BOM, para que o consumidor possa dar `JSON.parse` direto.
@@ -125,13 +179,20 @@ func DuplicateKey(fileName string, at time.Time) string {
 	return StatusPrefix + fileName + duplicateMarker + at.UTC().Format(StampLayout) + ".json"
 }
 
-// ReceptionKey é a chave do ciclo de recepção.
+// ReceptionKey é a chave do envelope de UM arquivo recebido.
 //
 // Publicada SOMENTE quando houve arquivo recebido ou erro. O agente roda a cada 5 minutos; publicar
 // sempre geraria centenas de objetos vazios por dia. A ausência significa "rodou e não havia nada a
 // receber" — quem consumir não pode ler silêncio como falha.
-func ReceptionKey(at time.Time) string {
-	return StatusPrefix + receptionPrefix + at.UTC().Format(StampLayout) + ".json"
+//
+// O NOME entra na chave, e não só o carimbo, porque o envelope é por ARQUIVO: ele carrega o hash e
+// as linhas que correlacionam aquele arquivo específico. Com a chave só de carimbo, dois arquivos
+// recebidos no mesmo segundo colidiriam — e o segundo apagaria a evidência do primeiro.
+//
+// O carimbo continua vindo primeiro para que a listagem do prefixo saia em ordem cronológica sem
+// parsing, e é ele que garante que uma recepção repetida NUNCA sobrescreva a anterior.
+func ReceptionKey(fileName string, at time.Time) string {
+	return StatusPrefix + receptionPrefix + at.UTC().Format(StampLayout) + "-" + fileName + ".json"
 }
 
 // ValidName recusa nome de arquivo que produziria chave inválida ou que escaparia do prefixo.

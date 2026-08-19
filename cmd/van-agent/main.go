@@ -10,6 +10,9 @@
 //     instalação nova — configuração, pastas, executável, filtro, registro — sem que nada precise
 //     existir no bucket, nem credencial, nem rede.
 //   - `transmissao` roda contra o bucket real.
+//   - `recepcao` traz o que o banco enviou e o deposita no bucket. É o ÚNICO ciclo que não paga
+//     ninguém se der errado, e por isso é por ele que se começa a exercitar qualquer instalação
+//     real.
 //
 // Que os dois compartilhem o MESMO ciclo é deliberado: um ensaio que exercitasse um caminho
 // diferente do de produção verificaria o ensaio, não a instalação.
@@ -22,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
@@ -57,8 +61,11 @@ func main() {
 		os.Exit(cycle(*mode, rehearsalStore))
 	case "transmissao":
 		os.Exit(cycle(*mode, realStore))
+	case "recepcao":
+		os.Exit(receive())
 	default:
-		fmt.Fprintln(os.Stderr, "uso: van-agent -modo=ensaio | van-agent -modo=transmissao")
+		fmt.Fprintln(os.Stderr,
+			"uso: van-agent -modo=ensaio | van-agent -modo=transmissao | van-agent -modo=recepcao")
 		os.Exit(exitConfig)
 	}
 }
@@ -147,6 +154,109 @@ func cycle(mode string, buildStore storeBuilder) int {
 		return exitSoftware
 	}
 	return exitOK
+}
+
+// receive roda uma passada de RECEPÇÃO contra o bucket real.
+//
+// Não há variante de ensaio: o ciclo de recepção não deposita nada na fila do banco, então o risco
+// que o ensaio existe para evitar não se aplica aqui.
+func receive() int {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "configuração: %v\n", err)
+		return exitConfig
+	}
+	if err := cfg.Spool.ValidateReception(); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"configuração da recepção: %v (defina %sSTCP_INBOUND_DIR e %sSTCP_RECEIVED_DIR)\n",
+			err, "VAN_AGENT_", "VAN_AGENT_")
+		return exitConfig
+	}
+
+	led, err := ledger.NewFileLedger(cfg.LedgerDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "registro de intenção: %v\n", err)
+		return exitConfig
+	}
+
+	// Diretório PRÓPRIO para o índice de recepção: ele indexa hash de conteúdo, o outro indexa nome
+	// de remessa, e uma pasta separada torna a colisão entre os dois impossível em vez de improvável.
+	index, err := ledger.NewFileReceptionIndex(filepath.Join(cfg.LedgerDir, "recepcao"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "índice de recepção: %v\n", err)
+		return exitConfig
+	}
+
+	sp, err := spool.NewDir(cfg.Spool)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pastas do cliente STCP: %v\n", err)
+		return exitConfig
+	}
+
+	client, err := stcp.NewCommandClient(cfg.Client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cliente STCP: %v\n", err)
+		return exitConfig
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	store, _, err := realStore(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "armazenamento: %v\n", err)
+		return exitConfig
+	}
+
+	ag, err := agent.New(store, led, client, sp, agent.Config{
+		Prefixes:      cfg.Prefixes,
+		NamePattern:   cfg.NamePattern,
+		NameMaxLength: cfg.NameMaxLength,
+		Clock:         time.Now,
+	}, agent.WithReceptionIndex(index))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "montar agente: %v\n", err)
+		return exitConfig
+	}
+
+	summary, err := ag.ReceiveCycle(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ciclo de recepção: %v\n", err)
+		return exitSoftware
+	}
+
+	reportReception(summary)
+	if errs := summary.Errs(); len(errs) > 0 {
+		fmt.Fprintf(os.Stderr, "o ciclo acumulou %d erro(s): %v\n", len(errs), errors.Join(errs...))
+		return exitSoftware
+	}
+	return exitOK
+}
+
+func reportReception(summary agent.ReceiveSummary) {
+	fmt.Printf("modo recepcao concluído · arquivos na pasta de entrada: %d\n", len(summary.Outcomes))
+	for _, o := range summary.Outcomes {
+		correlacao := "sem correlação no log"
+		if o.Correlated {
+			correlacao = "correlacionado pelo log"
+		}
+		fmt.Printf("  %-40s situação=%-12s %s · sha256=%s\n",
+			o.FileName, situationOrDash(o.Situation), correlacao, resumoDoHash(o.Sha256))
+	}
+	// O log diz ter recebido e o arquivo não estava lá: precisa aparecer, porque é o desfecho que
+	// ninguém percebe.
+	for _, ausente := range summary.LoggedButAbsent {
+		fmt.Printf("  ⚠️  %s consta no log deste ciclo e NÃO estava na pasta de entrada\n", ausente)
+	}
+}
+
+// resumoDoHash encurta o hash para leitura na tela. O valor completo vai para o envelope — aqui é
+// só para quem está olhando o console do agendador.
+func resumoDoHash(sum string) string {
+	if len(sum) <= 12 {
+		return sum
+	}
+	return sum[:12] + "…"
 }
 
 func report(mode, storeLabel string, pattern *regexp.Regexp, maxLen int, summary agent.Summary) {

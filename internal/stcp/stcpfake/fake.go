@@ -56,12 +56,28 @@ type Call struct {
 	Filter string
 }
 
+// Incoming é um arquivo que o banco entrega no próximo acionamento em modo de recepção.
+type Incoming struct {
+	Name    string
+	Content []byte
+	// Logged decide se a entrega deixa linha no log posicional.
+	//
+	// `false` encena o caso que o agente PRECISA tratar e que não é hipotético: a caixa é do
+	// convênio, e um arquivo pode estar na pasta sem que o log daquele ciclo o explique. Um duplo
+	// que sempre logasse tornaria o fallback inverificável.
+	Logged bool
+}
+
 // Fake é o duplo do cliente.
 type Fake struct {
 	OutboundDir string
 	BackupDir   string
+	InboundDir  string
 	LogPath     string
 	Profile     string
+
+	// Incoming é o que o banco entrega no próximo acionamento em modo R.
+	Incoming []Incoming
 
 	// Behavior decide o desfecho por arquivo. Nil significa sucesso para todos.
 	Behavior func(fileName string) Behavior
@@ -103,6 +119,12 @@ func (f *Fake) Run(_ context.Context, mode stcp.Mode, fileFilter string) (*int, 
 	f.mu.Lock()
 	f.calls = append(f.calls, Call{Mode: mode, Filter: fileFilter})
 	f.mu.Unlock()
+
+	if mode == stcp.ModeReceive || mode == stcp.ModeBoth {
+		if err := f.deliver(); err != nil {
+			return nil, err
+		}
+	}
 
 	if mode != stcp.ModeSend && mode != stcp.ModeBoth {
 		zero := 0
@@ -235,4 +257,41 @@ func padNum(s string, width int) string {
 		return s[len(s)-width:]
 	}
 	return strings.Repeat("0", width-len(s)) + s
+}
+
+// deliver encena o banco entregando arquivos na pasta de ENTRADA.
+//
+// §5, p.13 — o que é recebido fica na pasta de entrada configurada no perfil. O duplo escreve o
+// arquivo e, quando a entrega é logada, deixa o par de linhas de recepção (§12, p.30).
+func (f *Fake) deliver() error {
+	if len(f.Incoming) == 0 {
+		return nil
+	}
+	if f.InboundDir == "" {
+		return fmt.Errorf("pasta de entrada simulada não configurada")
+	}
+	if err := os.MkdirAll(f.InboundDir, 0o750); err != nil {
+		return err
+	}
+
+	var lines []string
+	for _, in := range f.Incoming {
+		if err := os.WriteFile(filepath.Join(f.InboundDir, in.Name), in.Content, 0o640); err != nil {
+			return err
+		}
+		if in.Logged {
+			lines = append(lines,
+				f.line(stcp.OpReceiveStart, stcp.ResultSuccess, in.Name),
+				f.line(stcp.OpReceiveEnd, stcp.ResultSuccess, in.Name),
+			)
+		}
+	}
+	// Entregar uma vez só: o cliente real não reentrega o que já entregou, e um duplo que
+	// reentregasse a cada acionamento esconderia o defeito de o agente não tirar o arquivo da pasta.
+	f.Incoming = nil
+
+	if len(lines) > 0 {
+		return f.appendLog(lines)
+	}
+	return nil
 }
