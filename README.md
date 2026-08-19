@@ -213,6 +213,41 @@ van-agent -modo=ensaio
 
 > ⚠️ **O ensaio aciona o cliente STCP de verdade.** Se houver arquivo na pasta de SAÍDA da instalação, ele **será transmitido** — é isso que o cliente faz (§5, p.13). Rodar ensaio numa instalação de produção com a fila suja transmite pagamento real.
 
+### Cliente encenado, para simulação sem a VAN
+
+```bash
+go build -o stcp-encenado ./cmd/stcp-encenado
+```
+
+O duplo do cliente (`internal/stcp/stcpfake`) é um pacote Go, injetado na suíte. Fora dela o agente aciona um **executável**, e quem monta uma simulação de ponta a ponta precisava escrever o próprio programa — foi o que aconteceu, e a frente passou a ter **dois modelos do mesmo sistema**. Este binário é o mesmo duplo com uma linha de comando por fora: o que a suíte prova e o que a simulação prova passam a ser a mesma coisa.
+
+> ⚠️⚠️ **Ele NÃO transmite nada, e é por isso que é perigoso.** Um falso cliente parece funcionar: apontar o agente para cá numa instalação real publicaria envelopes de `transmitido` sobre pagamentos que nunca saíram, e o desfecho não denunciaria. Por isso ele **recusa rodar** sem `STCP_ENCENADO_CONFIRMO=nao-transmite-nada` e anuncia o que é em toda execução. A confirmação é uma frase, e não um `1`, para não poder ser ligada por reflexo.
+
+Aponte o agente para ele com `VAN_AGENT_STCP_EXE`. A encenação em si vem de variáveis com **prefixo próprio**, para nunca serem confundidas com as do agente:
+
+| variável | o quê |
+| :-- | :-- |
+| `STCP_ENCENADO_CONFIRMO` | obrigatória, valor exato `nao-transmite-nada` |
+| `STCP_ENCENADO_OUTBOUND_DIR` · `_BACKUP_DIR` | pastas de SAÍDA e BACKUP (modos `S` e `B`) |
+| `STCP_ENCENADO_LOG_PATH` | arquivo do log posicional (§12, p.30) |
+| `STCP_ENCENADO_INBOUND_DIR` | pasta de ENTRADA (modos `R` e `B`) |
+| `STCP_ENCENADO_ENTREGAR_DE` | pasta com o que o "banco" vai entregar (modos `R` e `B`) |
+| `STCP_ENCENADO_PERFIL` | perfil gravado no log; default `PERFIL-DE-TESTE` |
+| `STCP_ENCENADO_COMPORTAMENTO` | `sucesso` · `recusa` · `sumico` · `falha-de-execucao`; default `sucesso` |
+| `STCP_ENCENADO_APLICAR_A` | regex; o comportamento acima vale só para os nomes que casam |
+| `STCP_ENCENADO_CODIGO_DE_FALHA` | resultado gravado na recusa (§11, pp. 24-29); default `000401` |
+| `STCP_ENCENADO_ENTREGAR_SEM_LOG` | regex; o que casar é entregue **sem** linha de log |
+
+**Serve aos dois ciclos.** Na transmissão move da SAÍDA para BACKUP e escreve o log; na recepção deposita na pasta de ENTRADA e deixa as linhas de recepção. Cada arquivo de `ENTREGAR_DE` é entregue **uma vez** — depois vai para `ENTREGAR_DE/entregues/`, porque o cliente real não reentrega o que já entregou, e um duplo que reentregasse esconderia a diferença entre "o banco reenviou" e "ninguém tirou o arquivo da pasta".
+
+Os quatro comportamentos importam porque três deles não são o caminho feliz:
+
+- **`sumico`** é o que nenhum simulador improvisado costuma cobrir: o arquivo sai da SAÍDA e **não** aparece em BACKUP. O agente precisa tratar isso como `revisao`, nunca como sucesso;
+- **`falha-de-execucao`** é o processo que não roda, que o agente distingue de "rodou e recusou";
+- **`ENTREGAR_SEM_LOG`** encena a não-correlação de propósito — o arquivo chega sem que o log daquele ciclo o explique, que é o caso onde `logDoCicloLido` decide.
+
+`APLICAR_A` restringe o comportamento a alguns nomes, para encenar **um** arquivo problemático no meio de uma fila que passa; encenar por fila inteira só exercitaria os extremos.
+
 ### Configuração
 
 Tudo por ambiente; nenhum default aponta para instalação real. São **dois conjuntos**, e a separação tem consequência prática.
@@ -289,6 +324,7 @@ A partir desta fatia, a garantia existe e é testada — em `internal/agent/tran
 
 ```
 cmd/van-agent/          binário one-shot
+cmd/stcp-encenado/      cliente STCP encenado — NÃO transmite; para simulação sem a VAN
 internal/
   agent/                o ciclo — a ordem das operações
   bucket/               fronteira com o object storage (interface + duplo + adapter S3)
