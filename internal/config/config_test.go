@@ -15,6 +15,7 @@ import (
 var todasAsVariaveis = []string{
 	"VAN_AGENT_LEDGER_DIR",
 	"VAN_AGENT_NAME_PATTERN",
+	"VAN_AGENT_NAME_MAX_LENGTH",
 	"VAN_AGENT_STCP_OUTBOUND_DIR",
 	"VAN_AGENT_STCP_BACKUP_DIR",
 	"VAN_AGENT_STCP_LOG_DIR",
@@ -314,5 +315,53 @@ func TestPathStyleComValorIlegivelFalhaNoBoot(t *testing.T) {
 
 	if _, err := config.LoadStorage(); err == nil {
 		t.Error("valor ilegível deveria falhar no boot")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Teto de comprimento do nome — configurável, e desligado por default
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestTetoDeNomeVemDoAmbienteENaoDeConstanteCompilada(t *testing.T) {
+	limpaAmbiente(t)
+	ambienteDaMaquina(t)
+	t.Setenv("VAN_AGENT_NAME_MAX_LENGTH", "26")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("configuração: %v", err)
+	}
+	if cfg.NameMaxLength != 26 {
+		t.Errorf("NameMaxLength = %d, esperava 26", cfg.NameMaxLength)
+	}
+}
+
+// O default é SEM trava, e isso é deliberado: o teto efetivo depende da instalação e do parceiro
+// (§11, p.26 — o procedimento do 1101 é condicional), e um default que recusasse por engano pararia
+// a fila inteira sem que ninguém tivesse pedido.
+func TestTetoDeNomeAusenteSignificaSemTrava(t *testing.T) {
+	limpaAmbiente(t)
+	ambienteDaMaquina(t)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("configuração: %v", err)
+	}
+	if cfg.NameMaxLength != 0 {
+		t.Errorf("sem a variável, o teto precisa ficar em 0 (sem trava); veio %d", cfg.NameMaxLength)
+	}
+}
+
+func TestTetoDeNomeInvalidoFalhaNoBoot(t *testing.T) {
+	for _, valor := range []string{"vinte e seis", "-1"} {
+		t.Run(valor, func(t *testing.T) {
+			limpaAmbiente(t)
+			ambienteDaMaquina(t)
+			t.Setenv("VAN_AGENT_NAME_MAX_LENGTH", valor)
+
+			if _, err := config.Load(); err == nil {
+				t.Errorf("teto %q deveria falhar no boot, não virar comportamento silencioso", valor)
+			}
+		})
 	}
 }

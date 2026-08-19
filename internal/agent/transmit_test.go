@@ -37,6 +37,7 @@ type harness struct {
 	t           *testing.T
 	store       *bucket.Memory
 	led         *ledger.FileLedger
+	sp          spool.Spool
 	fake        *stcpfake.Fake
 	ag          *agent.Agent
 	prefixes    bucket.Prefixes
@@ -93,7 +94,7 @@ func newHarness(t *testing.T) *harness {
 	}
 
 	return &harness{
-		t: t, store: store, led: led, fake: fake, ag: ag, prefixes: prefixes,
+		t: t, store: store, led: led, sp: sp, fake: fake, ag: ag, prefixes: prefixes,
 		outboundDir: outboundDir, backupDir: backupDir, logDir: logDir, now: now,
 	}
 }
@@ -440,5 +441,169 @@ func TestNomeComTravessiaNaoEhTransmitidoNemPublicaStatus(t *testing.T) {
 	}
 	if sum.Outcomes[0].Err == nil {
 		t.Error("esperava erro registrado para nome inválido")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trava de comprimento do nome
+//
+// O manual documenta um erro dedicado a nome longo (1101, §11 p.26), e o procedimento que ele
+// descreve é CONDICIONAL: depende de a opção de nome longo estar habilitada na instalação e de o
+// parceiro incorporá-la — nenhuma das duas verificada por medição. A trava existe para que a recusa
+// aconteça DESTE lado da fronteira, antes de o arquivo entrar na fila do banco.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// harnessComTeto monta o agente com a trava ligada. O resto é idêntico ao harness padrão: a trava é
+// configuração do ciclo, não um caminho separado.
+func harnessComTeto(t *testing.T, teto int) *harness {
+	t.Helper()
+	h := newHarness(t)
+	ag, err := agent.New(h.store, h.led, h.fake, h.sp, agent.Config{
+		Prefixes:      h.prefixes,
+		NamePattern:   namePattern,
+		NameMaxLength: teto,
+		Clock:         func() time.Time { return h.now },
+	})
+	if err != nil {
+		t.Fatalf("montar agente com teto: %v", err)
+	}
+	h.ag = ag
+	return h
+}
+
+func TestTeto_NomeLongoVaiParaFalhasSemAcionarOCliente(t *testing.T) {
+	// O nome do fixture tem 34 caracteres; um teto de 26 é o que o manual documenta como base.
+	h := harnessComTeto(t, 26)
+	h.queue(remittanceName, remittanceContent)
+
+	sum := h.run()
+
+	// O que mais importa: nada chegou ao banco.
+	if len(h.fake.Calls()) != 0 {
+		t.Fatalf("o cliente NÃO podia ser acionado para nome longo; houve %d chamada(s)", len(h.fake.Calls()))
+	}
+	if sum.Outcomes[0].Situation != envelope.Failed {
+		t.Errorf("situação = %q, esperava %q", sum.Outcomes[0].Situation, envelope.Failed)
+	}
+	if !h.hasObject(h.prefixes.Failed + remittanceName) {
+		t.Errorf("o objeto deveria estar em falhas; chaves: %v", h.store.Keys())
+	}
+
+	env := h.statusFor(envelope.Key(remittanceName))
+	if !strings.Contains(env.Detalhe, agent.RefusalNameLength) {
+		t.Errorf("o detalhe deveria carregar o código %q; veio: %q", agent.RefusalNameLength, env.Detalhe)
+	}
+	// O arquivo continua na pasta de SAÍDA? Não — ele nunca foi depositado lá. A recusa acontece
+	// antes do passo 2, que é o ponto do critério: recusar antes de tocar a fila do banco.
+	if _, err := os.Stat(filepath.Join(h.outboundDir, remittanceName)); err == nil {
+		t.Error("o arquivo foi depositado na pasta de SAÍDA apesar da recusa")
+	}
+}
+
+// O nome NÃO é truncado, e a razão não é estilo: truncar mudaria a chave de idempotência, e dois
+// nomes distintos truncados para o mesmo prefixo colidiriam no registro — a segunda remessa seria
+// lida como duplicado e nunca sairia.
+func TestTeto_NomeLongoNaoEhTruncadoNemGravaIntencao(t *testing.T) {
+	h := harnessComTeto(t, 26)
+	h.queue(remittanceName, remittanceContent)
+	h.run()
+
+	if _, found, err := h.led.Lookup(remittanceName); err != nil {
+		t.Fatalf("consultar registro: %v", err)
+	} else if found {
+		t.Error("uma recusa de nomenclatura não pode gravar registro: não houve tentativa de transmissão")
+	}
+	// E nada com nome truncado apareceu em lugar nenhum.
+	for _, k := range h.store.Keys() {
+		if nome := bucket.NameOf(k); nome != remittanceName && strings.HasPrefix(remittanceName, nome) {
+			t.Errorf("apareceu um objeto com nome truncado: %q", k)
+		}
+	}
+}
+
+func TestTeto_NomeDentroDoLimiteSegueNormalmente(t *testing.T) {
+	h := harnessComTeto(t, len(remittanceName))
+	h.queue(remittanceName, remittanceContent)
+
+	sum := h.run()
+
+	if sum.Outcomes[0].Situation != envelope.Transmitted {
+		t.Errorf("nome exatamente no limite deveria passar; situação = %q", sum.Outcomes[0].Situation)
+	}
+}
+
+// Sem trava configurada, nada muda para quem já roda: é o default, e é deliberado — o teto efetivo
+// depende da instalação e do parceiro, e recusar por engano pararia a fila inteira.
+func TestTeto_SemConfiguracaoNaoHaTrava(t *testing.T) {
+	h := newHarness(t)
+	h.queue(remittanceName, remittanceContent)
+
+	sum := h.run()
+
+	if sum.Outcomes[0].Situation != envelope.Transmitted {
+		t.Errorf("sem teto configurado a remessa deveria seguir; situação = %q", sum.Outcomes[0].Situation)
+	}
+}
+
+// A checagem de comprimento NÃO substitui a de forma: um nome curto e fora do padrão continua
+// recusado, e com um código diferente — as duas causas levam a ações diferentes.
+func TestTeto_NomeCurtoForaDoPadraoContinuaRecusadoComOutroCodigo(t *testing.T) {
+	h := harnessComTeto(t, 26)
+	h.queue("X.txt", "conteúdo alheio")
+
+	sum := h.run()
+
+	if sum.Outcomes[0].Situation != envelope.Failed {
+		t.Errorf("situação = %q, esperava %q", sum.Outcomes[0].Situation, envelope.Failed)
+	}
+	env := h.statusFor(envelope.Key("X.txt"))
+	if !strings.Contains(env.Detalhe, agent.RefusalNamePattern) {
+		t.Errorf("o detalhe deveria carregar o código %q; veio: %q", agent.RefusalNamePattern, env.Detalhe)
+	}
+	if strings.Contains(env.Detalhe, agent.RefusalNameLength) {
+		t.Errorf("um nome curto não pode ser recusado por comprimento; veio: %q", env.Detalhe)
+	}
+}
+
+// O critério que fecha o item: quem lê o envelope precisa distinguir recusa do TRANSPORTE de recusa
+// do BANCO. A primeira se conserta mudando o nome no emissor; a segunda exige olhar o convênio.
+func TestTeto_EnvelopeDistingueRecusaDoTransporteDeRecusaDoBanco(t *testing.T) {
+	transporte := harnessComTeto(t, 26)
+	transporte.queue(remittanceName, remittanceContent)
+	transporte.run()
+	recusadoAqui := transporte.statusFor(envelope.Key(remittanceName))
+
+	banco := newHarness(t)
+	banco.fake.Behavior = func(string) stcpfake.Behavior { return stcpfake.Reject }
+	banco.queue(remittanceName, remittanceContent)
+	banco.run()
+	recusadoLa := banco.statusFor(envelope.Key(remittanceName))
+
+	// As duas são `falha` — a situação sozinha não basta, e é por isso que o critério existe.
+	if recusadoAqui.Situacao != recusadoLa.Situacao {
+		t.Fatalf("as duas recusas deveriam compartilhar a situação; %q vs %q",
+			recusadoAqui.Situacao, recusadoLa.Situacao)
+	}
+
+	// Recusa do transporte: o cliente não rodou, então não há código de saída nem linha de log.
+	if recusadoAqui.ExitCode != nil {
+		t.Errorf("recusa do transporte não pode ter exitCode; veio %d", *recusadoAqui.ExitCode)
+	}
+	if len(recusadoAqui.LogTransferencia) != 0 {
+		t.Errorf("recusa do transporte não pode ter linha de log; veio %v", recusadoAqui.LogTransferencia)
+	}
+	if !strings.Contains(recusadoAqui.Detalhe, "nenhuma tentativa chegou ao banco") {
+		t.Errorf("o detalhe precisa dizer que nada chegou ao banco; veio: %q", recusadoAqui.Detalhe)
+	}
+
+	// Recusa do banco: o cliente rodou, e a evidência disso está no envelope.
+	if recusadoLa.ExitCode == nil {
+		t.Error("recusa do banco deveria trazer o código de saída do cliente")
+	}
+	if len(recusadoLa.LogTransferencia) == 0 {
+		t.Error("recusa do banco deveria trazer as linhas do log")
+	}
+	if strings.Contains(recusadoLa.Detalhe, "recusa-nomenclatura") {
+		t.Errorf("recusa do banco não pode carregar código de nomenclatura; veio: %q", recusadoLa.Detalhe)
 	}
 }
