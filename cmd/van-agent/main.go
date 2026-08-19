@@ -125,9 +125,10 @@ func cycle(mode string, buildStore storeBuilder) int {
 	}
 
 	ag, err := agent.New(store, led, client, sp, agent.Config{
-		Prefixes:    cfg.Prefixes,
-		NamePattern: cfg.NamePattern,
-		Clock:       time.Now,
+		Prefixes:      cfg.Prefixes,
+		NamePattern:   cfg.NamePattern,
+		NameMaxLength: cfg.NameMaxLength,
+		Clock:         time.Now,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "montar agente: %v\n", err)
@@ -140,7 +141,7 @@ func cycle(mode string, buildStore storeBuilder) int {
 		return exitSoftware
 	}
 
-	report(mode, storeLabel, cfg.NamePattern, summary)
+	report(mode, storeLabel, cfg.NamePattern, cfg.NameMaxLength, summary)
 	if errs := summary.Errs(); len(errs) > 0 {
 		fmt.Fprintf(os.Stderr, "o ciclo acumulou %d erro(s): %v\n", len(errs), errors.Join(errs...))
 		return exitSoftware
@@ -148,13 +149,23 @@ func cycle(mode string, buildStore storeBuilder) int {
 	return exitOK
 }
 
-func report(mode, storeLabel string, pattern *regexp.Regexp, summary agent.Summary) {
-	fmt.Printf("modo %s concluído · %s · padrão de nome: %s\n", mode, storeLabel, pattern)
+func report(mode, storeLabel string, pattern *regexp.Regexp, maxLen int, summary agent.Summary) {
+	fmt.Printf("modo %s concluído · %s · padrão de nome: %s · teto de comprimento: %s\n",
+		mode, storeLabel, pattern, limitOrNone(maxLen))
 	fmt.Printf("objetos na fila: %d\n", len(summary.Outcomes))
 	for _, o := range summary.Outcomes {
 		fmt.Printf("  %-40s situação=%-12s cliente acionado=%v\n",
 			o.FileName, situationOrDash(o.Situation), o.ClientInvoked)
 	}
+}
+
+// limitOrNone deixa visível no relatório que a trava está desligada. Quem roda o ensaio numa
+// instalação nova precisa ver que ela não está protegendo nada — e não descobrir isso pelo 1101.
+func limitOrNone(maxLen int) string {
+	if maxLen <= 0 {
+		return "sem trava"
+	}
+	return fmt.Sprintf("%d caracteres", maxLen)
 }
 
 func situationOrDash(s envelope.Situation) string {
