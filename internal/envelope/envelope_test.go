@@ -172,6 +172,30 @@ func buildGolden() goldenFile {
 						Correlacionado: false,
 					}),
 			},
+			{
+				// O mesmo CONTEÚDO reaparecendo. Reconhecido pelo hash, nunca pelo nome: o nome é
+				// atribuído pelo banco, o mesmo arquivo pode voltar com nome diferente, e nomes
+				// iguais podem trazer conteúdo diferente.
+				//
+				// `chave` aponta para a recepção ORIGINAL, e é a mesma de `duplicadoDe`: nada novo
+				// foi depositado, e o consumidor precisa saber a qual objeto este envelope se refere.
+				Nome:                 "recepção duplicada — mesmo conteúdo já recebido",
+				Tipo:                 "reception",
+				ContaComoTransmissao: false,
+				Chave:                envelope.ReceptionKey(returnName, at),
+				Envelope: envelope.NewReception(returnName, at, envelope.Reception,
+					"conteúdo idêntico a uma recepção anterior (mesmo sha256), já depositado em "+
+						`"retorno/`+returnName+`" em 2026-08-18T11:00:00Z; o objeto anterior NÃO foi `+
+						"sobrescrito e nada foi depositado de novo",
+					nil, nil,
+					envelope.ReceptionInfo{
+						Sha256:         returnSum,
+						Chave:          "retorno/" + returnName,
+						Correlacionado: true,
+						Duplicado:      true,
+						DuplicadoDe:    "retorno/" + returnName,
+					}),
+			},
 		},
 	}
 }

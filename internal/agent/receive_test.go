@@ -85,24 +85,29 @@ func newReceiveHarness(t *testing.T) *receiveHarness {
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	fake := stcpfake.New(outboundDir, backupDir, filepath.Join(logDir, "20260818.LOG"))
 	fake.InboundDir = inboundDir
-	fake.Now = func() time.Time { return now }
 
 	store := bucket.NewMemory()
 	prefixes := bucket.DefaultPrefixes()
 
+	h := &receiveHarness{
+		t: t, store: store, index: index, fake: fake, prefixes: prefixes,
+		inboundDir: inboundDir, receivedin: receivedDir, now: now,
+	}
+
+	// O relógio lê do harness a cada chamada: os testes de duplicidade precisam encenar ciclos em
+	// momentos DIFERENTES, e um relógio congelado na construção faria duas recepções distintas
+	// caírem na mesma chave — escondendo justamente o que elas verificam.
 	ag, err := agent.New(store, led, fake, sp, agent.Config{
 		Prefixes:    prefixes,
 		NamePattern: namePattern,
-		Clock:       func() time.Time { return now },
+		Clock:       func() time.Time { return h.now },
 	}, agent.WithReceptionIndex(index))
 	if err != nil {
 		t.Fatalf("montar agente: %v", err)
 	}
-
-	return &receiveHarness{
-		t: t, store: store, index: index, fake: fake, ag: ag, prefixes: prefixes,
-		inboundDir: inboundDir, receivedin: receivedDir, now: now,
-	}
+	h.ag = ag
+	h.avancaRelogio()
+	return h
 }
 
 // entrega enfileira um arquivo para o próximo acionamento em modo de recepção.
@@ -111,6 +116,16 @@ func (h *receiveHarness) entrega(name, content string, logged bool) {
 	h.fake.Incoming = append(h.fake.Incoming, stcpfake.Incoming{
 		Name: name, Content: []byte(content), Logged: logged,
 	})
+}
+
+// avancaRelogio sincroniza o duplo do cliente com o relógio do harness.
+func (h *receiveHarness) avancaRelogio() {
+	h.fake.Now = func() time.Time { return h.now }
+}
+
+func (h *receiveHarness) hasKey(key string) bool {
+	_, err := h.store.Get(context.Background(), key)
+	return err == nil
 }
 
 func (h *receiveHarness) run() agent.ReceiveSummary {
@@ -388,5 +403,180 @@ func TestCA5_CicloDeRecepcaoRecusaRodarSemIndice(t *testing.T) {
 
 	if _, err := semIndice.ReceiveCycle(context.Background()); err == nil {
 		t.Error("o ciclo deveria recusar rodar sem índice de recepção")
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Idempotência da recepção — as três combinações que o hash separa e o nome não
+//
+// A idempotência que protege o NEGÓCIO é a do efeito, e ela vive no core-api (chave de negócio:
+// NSA + "Seu Número"). O que estes testes cobram é outra coisa, e é o que o agente pode garantir:
+// que ele não PERDE e não CONFUNDE arquivos. Ele nunca abre CNAB e não conhece chave de negócio.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CA1 — mesmo nome, mesmo conteúdo: o objeto original não é sobrescrito.
+func TestCA5_MesmoConteudoReaparecendoNaoSobrescreveEDeclaraDuplicidade(t *testing.T) {
+	h := newReceiveHarness(t)
+	h.entrega(returnName, returnContent, true)
+	primeiro := h.run()
+
+	chaveOriginal := primeiro.Outcomes[0].StoredKey
+	envelopeOriginal := primeiro.Outcomes[0].StatusKey
+	conteudoOriginal := h.objeto(chaveOriginal)
+
+	// O banco reenvia o mesmo arquivo num ciclo posterior.
+	h.now = h.now.Add(time.Hour)
+	h.avancaRelogio()
+	h.entrega(returnName, returnContent, true)
+	segundo := h.run()
+
+	if !segundo.Outcomes[0].Duplicate {
+		t.Error("a reaparição do mesmo conteúdo deveria ser reconhecida como duplicada")
+	}
+	// O objeto original continua intacto. Sobrescrever um arquivo de retorno destrói evidência de um
+	// pagamento — o pior lugar possível para perder registro.
+	if string(h.objeto(chaveOriginal)) != string(conteudoOriginal) {
+		t.Error("o objeto original foi sobrescrito")
+	}
+	// E o envelope da primeira recepção continua legível, sob a chave dele.
+	if _, err := h.store.Get(context.Background(), envelopeOriginal); err != nil {
+		t.Errorf("o envelope da recepção original sumiu: %v", err)
+	}
+
+	// O envelope do duplicado vem sob chave DISTINTA e aponta para a recepção anterior.
+	dup := h.envelopeEm(segundo.Outcomes[0].StatusKey)
+	if segundo.Outcomes[0].StatusKey == envelopeOriginal {
+		t.Fatal("o envelope do duplicado sobrescreveu o da recepção original")
+	}
+	if dup.Recepcao == nil || !dup.Recepcao.Duplicado {
+		t.Fatal("o envelope precisa declarar a recepção duplicada")
+	}
+	if dup.Recepcao.DuplicadoDe != chaveOriginal {
+		t.Errorf("duplicadoDe = %q, esperava %q", dup.Recepcao.DuplicadoDe, chaveOriginal)
+	}
+}
+
+// CA2 — mesmo NOME, conteúdo DIFERENTE: é arquivo novo, e os dois continuam recuperáveis.
+//
+// O nome é atribuído pelo banco e não é identificador. Tratá-lo como tal descartaria um retorno
+// legítimo — a pior das duas falhas opostas que deduplicar por nome produz.
+func TestCA5_MesmoNomeComConteudoDiferenteEhArquivoNovo(t *testing.T) {
+	h := newReceiveHarness(t)
+	h.entrega(returnName, returnContent, true)
+	primeiro := h.run()
+	chaveOriginal := primeiro.Outcomes[0].StoredKey
+
+	const outroConteudo = "0372345...OUTRO LOTE, MESMO NOME..."
+	h.now = h.now.Add(time.Hour)
+	h.avancaRelogio()
+	h.entrega(returnName, outroConteudo, true)
+	segundo := h.run()
+
+	if segundo.Outcomes[0].Duplicate {
+		t.Error("conteúdo diferente NUNCA é duplicado, mesmo com o nome igual")
+	}
+	novaChave := segundo.Outcomes[0].StoredKey
+	if novaChave == chaveOriginal {
+		t.Fatal("o segundo arquivo foi depositado sobre o primeiro")
+	}
+
+	// Os dois permanecem recuperáveis, cada um com o seu conteúdo.
+	if string(h.objeto(chaveOriginal)) != returnContent {
+		t.Error("o conteúdo do primeiro arquivo mudou")
+	}
+	if string(h.objeto(novaChave)) != outroConteudo {
+		t.Error("o conteúdo do segundo arquivo não é o que chegou")
+	}
+}
+
+// CA3 — nome DIFERENTE, conteúdo IDÊNTICO: só o hash pega, e o envelope diz a qual recepção
+// anterior corresponde.
+func TestCA5_NomeDiferenteComMesmoConteudoEhReconhecidoPeloHash(t *testing.T) {
+	h := newReceiveHarness(t)
+	h.entrega(returnName, returnContent, true)
+	primeiro := h.run()
+	chaveOriginal := primeiro.Outcomes[0].StoredKey
+
+	const outroNome = "PAG_000000.20260818130000_0002.RET"
+	h.now = h.now.Add(time.Hour)
+	h.avancaRelogio()
+	h.entrega(outroNome, returnContent, true)
+	segundo := h.run()
+
+	if !segundo.Outcomes[0].Duplicate {
+		t.Fatal("o mesmo conteúdo com outro nome precisa ser reconhecido pelo hash")
+	}
+	// Nada de novo foi depositado: uma cópia idêntica sob outra chave só produziria um objeto que
+	// ninguém sabe ligar à original.
+	if segundo.Outcomes[0].StoredKey != "" {
+		t.Errorf("nada devia ter sido depositado; veio %q", segundo.Outcomes[0].StoredKey)
+	}
+	if h.hasKey(h.prefixes.Returns + outroNome) {
+		t.Error("o conteúdo repetido foi depositado sob o nome novo")
+	}
+
+	dup := h.envelopeEm(segundo.Outcomes[0].StatusKey)
+	if dup.Recepcao == nil || dup.Recepcao.DuplicadoDe != chaveOriginal {
+		t.Errorf("o envelope precisa apontar para a recepção anterior (%q); veio %+v", chaveOriginal, dup.Recepcao)
+	}
+	// O detalhe precisa registrar que o NOME mudou — é o que explica a quem investiga por que um
+	// arquivo aparentemente novo não gerou objeto novo.
+	if !strings.Contains(dup.Detalhe, returnName) {
+		t.Errorf("o detalhe deveria citar o nome da recepção anterior; veio: %q", dup.Detalhe)
+	}
+}
+
+// CA4 — o envelope carrega o hash em TODOS os desfechos, inclusive no duplicado: é o que permite ao
+// core-api decidir sem reabrir o objeto.
+func TestCA5_TodoEnvelopeDeRecepcaoCarregaOHash(t *testing.T) {
+	h := newReceiveHarness(t)
+	h.entrega(returnName, returnContent, true)
+	primeiro := h.run()
+
+	h.now = h.now.Add(time.Hour)
+	h.avancaRelogio()
+	h.entrega(returnName, returnContent, true)
+	segundo := h.run()
+
+	for _, key := range []string{primeiro.Outcomes[0].StatusKey, segundo.Outcomes[0].StatusKey} {
+		env := h.envelopeEm(key)
+		if env.Recepcao == nil || env.Recepcao.Sha256 != sha256Of(returnContent) {
+			t.Errorf("envelope em %q não carrega o sha256 do conteúdo: %+v", key, env.Recepcao)
+		}
+	}
+}
+
+// CA5 — os dois índices coexistem. Um indexa nome de remessa, o outro hash de conteúdo; um
+// diretório compartilhado deixaria aberta a colisão entre os dois.
+func TestCA5_IndiceDeRecepcaoNaoColideComORegistroDeRemessa(t *testing.T) {
+	h := newReceiveHarness(t)
+
+	// Uma remessa é transmitida — o registro dela existe.
+	h.store.Seed(h.prefixes.Outbound+remittanceName, []byte(remittanceContent))
+	if _, err := h.ag.TransmitCycle(context.Background()); err != nil {
+		t.Fatalf("ciclo de transmissão: %v", err)
+	}
+
+	// E um arquivo é recebido.
+	h.entrega(returnName, returnContent, true)
+	h.run()
+
+	// Os dois registros continuam íntegros e independentes.
+	entry, found, err := h.index.Lookup(sha256Of(returnContent))
+	if err != nil || !found {
+		t.Fatalf("o registro de recepção sumiu (found=%v, err=%v)", found, err)
+	}
+	if entry.Arquivo != returnName {
+		t.Errorf("o registro de recepção guarda %q, esperava %q", entry.Arquivo, returnName)
+	}
+
+	// E a remessa continua sendo tratada como duplicada, ou seja: o registro dela não foi tocado.
+	h.store.Seed(h.prefixes.Outbound+remittanceName, []byte(remittanceContent))
+	acionamentos := len(h.fake.Calls())
+	if _, err := h.ag.TransmitCycle(context.Background()); err != nil {
+		t.Fatalf("segundo ciclo de transmissão: %v", err)
+	}
+	if len(h.fake.Calls()) != acionamentos {
+		t.Error("o registro da remessa foi perdido: o cliente foi acionado de novo para o mesmo nome")
 	}
 }
