@@ -14,6 +14,8 @@ Issue: [core-api#735](https://github.com/ERP-Bem-Comum/core-api/issues/735).
 
 **Fatia 1 — núcleo, entregue.** O ciclo de transmissão, a idempotência e o tratamento de execução interrompida existem e são exercitados contra um duplo do cliente STCP.
 
+**Fatia 2 — o adapter de object storage, entregue.** O ciclo atravessa a fronteira: `-modo=transmissao` lê e escreve num bucket de verdade.
+
 | Critério                                                                       | Estado     |
 | :----------------------------------------------------------------------------- | :--------- |
 | **CA1** — transmissão publica status e move para processados                   | ✅         |
@@ -21,11 +23,17 @@ Issue: [core-api#735](https://github.com/ERP-Bem-Comum/core-api/issues/735).
 | **CA3** — nome já processado **não aciona** o cliente                          | ✅         |
 | **CA4** — execução interrompida vai para revisão humana, **nunca** retransmite | ✅         |
 | **CA7** — filtro de nomenclatura, inclusive contra arquivo intruso na pasta    | ✅         |
-| **CA5** — ciclo de recepção                                                    | ⬜ fatia 2 |
-| **CA6** — erro de identidade não gera retentativa cega                         | ⬜ fatia 2 |
-| **CA8** — credencial por role da instância, nada em disco                      | ⬜ fatia 3 |
+| **CA8** — credencial por role da instância, nada em disco                      | ✅¹        |
+| **CA5** — ciclo de recepção                                                    | ⬜ [#3][i3] |
+| **CA6** — erro de identidade não gera retentativa cega                         | ⬜ [#3][i3] |
 
-O **adapter de object storage não existe ainda** — a fatia 1 se sustenta na interface `bucket.Store` e num duplo em memória. Por isso só o modo `ensaio` está disponível no binário.
+¹ do lado do código: sem chave informada, a resolução cai na cadeia de provedores, e nada de credencial existe em disco ou em variável. A role **atribuída à instância** é infraestrutura, e não vive neste repositório.
+
+[i3]: https://github.com/ERP-Bem-Comum/van-agent/issues/3
+
+O **cliente STCP continua sendo um duplo** nos testes, e continua sendo pela razão que não muda: não há ambiente de homologação, e a única conexão existente é a de produção no convênio real. O que deixou de ser duplo é o armazenamento — `internal/bucket/s3.go` implementa `bucket.Store` sobre o SDK oficial da AWS, e a suíte o exercita contra um endpoint S3-compatível quando há um configurado.
+
+⚠️ **A fidelidade do duplo do cliente é o teto da confiança de todo o resto.** Ele é modelado a partir do manual, mas não é o binário do banco.
 
 ---
 
@@ -87,9 +95,32 @@ Dois detalhes do contrato que quebram o consumidor em silêncio se forem esqueci
 
 ```bash
 go test ./...                      # a suíte
+go vet ./... && gofmt -l .         # não há linter configurado; use estes
 go build ./cmd/van-agent           # o binário
 GOOS=windows GOARCH=amd64 go build -o van-agent.exe ./cmd/van-agent   # compilação cruzada
 ```
+
+### Teste de integração do armazenamento
+
+Os testes que falam com um object storage de verdade são **pulados** quando não há endpoint configurado — a suíte precisa continuar rodável numa máquina sem nuvem e sem rede. Para exercitá-los, aponte para qualquer S3-compatível:
+
+```bash
+VAN_S3_ENDPOINT=http://<host>:<porta> \
+VAN_S3_REGION=us-east-1 \
+VAN_S3_ACCESS_KEY_ID=… VAN_S3_SECRET_ACCESS_KEY=… \
+VAN_S3_FORCE_PATH_STYLE=true \
+go test ./... -count=1
+```
+
+Dois testes acordam com isso: `TestCA7_AdapterRealExercitaOsQuatroMetodos` (os quatro métodos da interface) e `TestCA1_CicloCompletoContraObjectStorageReal` (o ciclo inteiro — remessa depositada, transmitida pelo duplo do cliente, status publicado e objeto movido, tudo no bucket real).
+
+### Modo transmissão
+
+```bash
+van-agent -modo=transmissao
+```
+
+Roda o ciclo contra o bucket configurado em `VAN_S3_*`. É o modo de produção.
 
 ### Modo ensaio
 
@@ -103,20 +134,35 @@ van-agent -modo=ensaio
 
 ### Configuração
 
-Tudo por ambiente; nenhum default aponta para instalação real.
+Tudo por ambiente; nenhum default aponta para instalação real. São **dois conjuntos**, e a separação tem consequência prática.
 
-| Variável                                                   | Obrigatória | Nota                                             |
-| :--------------------------------------------------------- | :---------: | :----------------------------------------------- |
-| `VAN_AGENT_BUCKET`                                         |     ✅      | homologação e produção são buckets **separados** |
-| `VAN_AGENT_LEDGER_DIR`                                     |     ✅      | caminho **local** e persistente                  |
-| `VAN_AGENT_NAME_PATTERN`                                   |     ✅      | precisa ancorar o nome inteiro (`^…$`)           |
-| `VAN_AGENT_STCP_EXE` · `_INI` · `_PROFILE`                 |     ✅      | instalação do cliente                            |
-| `VAN_AGENT_STCP_OUTBOUND_DIR` · `_BACKUP_DIR` · `_LOG_DIR` |     ✅      | pastas do cliente                                |
-| `VAN_AGENT_STCP_RETRIES` · `_RETRY_INTERVAL_SECONDS`       |             | `-r` e `-t` (§6, p.14)                           |
-| `VAN_AGENT_STCP_TRANSFER_LOG_GLOB`                         |             | ver pendências                                   |
-| `VAN_AGENT_PREFIX_*`                                       |             | os cinco do ADR-0061 §1                          |
+**`VAN_AGENT_*` — a máquina.** Lido em qualquer modo, inclusive no ensaio.
 
-**Credencial não se configura.** A autenticação é por role da instância (ADR-0061 §5) — nenhuma chave em disco, nenhuma em variável.
+| Variável                                                   | Obrigatória | Nota                                   |
+| :--------------------------------------------------------- | :---------: | :------------------------------------- |
+| `VAN_AGENT_LEDGER_DIR`                                     |     ✅      | caminho **local** e persistente        |
+| `VAN_AGENT_NAME_PATTERN`                                   |     ✅      | precisa ancorar o nome inteiro (`^…$`) |
+| `VAN_AGENT_STCP_EXE` · `_INI` · `_PROFILE`                 |     ✅      | instalação do cliente                  |
+| `VAN_AGENT_STCP_OUTBOUND_DIR` · `_BACKUP_DIR` · `_LOG_DIR` |     ✅      | pastas do cliente                      |
+| `VAN_AGENT_STCP_RETRIES` · `_RETRY_INTERVAL_SECONDS`       |             | `-r` e `-t` (§6, p.14)                 |
+| `VAN_AGENT_STCP_TRANSFER_LOG_GLOB`                         |             | ver pendências                         |
+
+**`VAN_S3_*` — o bucket.** É o **mesmo conjunto que o core-api lê** em `van-s3-config.ts`, com as mesmas regras. Os dois lados leem os mesmos nomes de propósito: um agente que varresse um prefixo e um emissor que depositasse noutro produziriam uma fila silenciosamente vazia, sem erro em lugar nenhum. Exigido só no `-modo=transmissao`.
+
+| Variável                                                                     | Obrigatória | Comportamento no boot                                                    |
+| :--------------------------------------------------------------------------- | :---------: | :----------------------------------------------------------------------- |
+| `VAN_S3_BUCKET`                                                              |     ✅      | ausente ⇒ falha **nomeando a variável**; homologação e produção são buckets **separados** |
+| `VAN_S3_REGION`                                                              |     ✅      | ausente ⇒ falha nomeando a variável                                      |
+| `VAN_S3_ENDPOINT`                                                            |             | vazio ⇒ AWS; preenchido ⇒ S3-compatível                                  |
+| `VAN_S3_ACCESS_KEY_ID` · `_SECRET_ACCESS_KEY`                                |             | **XOR é erro**: só uma delas ⇒ falha nomeando a que falta. **Ausentes as duas ⇒ cadeia de provedores (role da instância)** — é o caminho de produção |
+| `VAN_S3_FORCE_PATH_STYLE`                                                    |             | valor ilegível ⇒ falha. Ver a nota abaixo                                |
+| `VAN_S3_PREFIX_OUTBOUND` · `_PROCESSED` · `_FAILED` · `_RETURNS` · `_STATUS` |             | sem barra final ⇒ **normalizado** com barra; começando com barra ⇒ falha nomeando a variável |
+
+**Credencial não é o caminho de produção.** A autenticação é por role da instância (ADR-0061 §5) — nenhuma chave em disco, nenhuma em variável. O par estático existe para exercitar o adapter contra um endpoint local, e o valor **nunca aparece em log**: os tipos que o carregam redigem o segredo ao serem formatados.
+
+**Por que a barra final é erro e não conveniência:** sem ela, `saida` + `ARQUIVO.REM` vira `saidaARQUIVO.REM` — um objeto na raiz do bucket, que nenhuma listagem por prefixo encontra. A remessa sumiria sem erro em lugar nenhum.
+
+> ℹ️ `VAN_S3_FORCE_PATH_STYLE` é **adição deste repositório**, e não existe do lado do core-api. Sem ela, o endereçamento por caminho é ligado pela mesma heurística de lá (endpoint apontando para `localhost`/`127.0.0.1`/`0.0.0.0`). A variável foi necessária ao exercitar o adapter contra um S3-compatível **fora** de localhost: um endereço de rede interna passa pela heurística como se fosse a AWS, e o SDK vai procurar um subdomínio que não existe. Não definida, o comportamento é idêntico ao do core-api — foi por isso que ela pôde entrar sem que a outra metade da fronteira mudasse junto.
 
 O agendamento é do **Agendador de Tarefas do Windows** (§10, pp. 20-23), como o fabricante documenta. O processo é one-shot: roda um ciclo e sai. Códigos de saída: `0` OK · `70` erro de execução · `78` configuração.
 
@@ -147,7 +193,7 @@ A partir desta fatia, a garantia existe e é testada — em `internal/agent/tran
 cmd/van-agent/          binário one-shot
 internal/
   agent/                o ciclo — a ordem das operações
-  bucket/               fronteira com o object storage (interface + duplo)
+  bucket/               fronteira com o object storage (interface + duplo + adapter S3)
   config/               leitura do ambiente
   envelope/             o contrato do status/
   ledger/               a intenção gravada antes de transmitir
