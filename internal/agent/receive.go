@@ -64,7 +64,13 @@ type ReceiveSummary struct {
 	// o cliente registrou", nunca "o cliente não registrou nada" — a distinção é o que impede o
 	// consumidor de represar pagamento com base numa ignorância disfarçada de conclusão.
 	LogDoCicloLido bool
-	Outcomes       []ReceiveOutcome
+	// Republicados conta envelopes de ciclos anteriores cuja publicação só se confirmou agora.
+	// Diferente de zero significa que houve órfão no bucket até esta passada.
+	Republicados int
+	// ReconcileErr é o que falhou ao republicar. Fica separado dos erros dos arquivos porque não é
+	// sobre nenhum arquivo deste ciclo — é sobre um desfecho antigo que continua sem sair.
+	ReconcileErr error
+	Outcomes     []ReceiveOutcome
 	// LoggedButAbsent são nomes que o log diz ter recebido e que não estavam na pasta.
 	//
 	// Não viram desfecho — o agente não inventa arquivo a partir do log —, mas precisam aparecer:
@@ -74,8 +80,15 @@ type ReceiveSummary struct {
 }
 
 // Errs devolve os erros acumulados. Um arquivo problemático não interrompe os demais.
+//
+// A falha de reconciliação entra aqui de propósito: ela precisa fazer o ciclo sair com erro, senão
+// um desfecho que nunca chegou ao bucket ficaria pendente sem nada chamar atenção — que é o
+// desfecho que este mecanismo existe para eliminar.
 func (s ReceiveSummary) Errs() []error {
 	var out []error
+	if s.ReconcileErr != nil {
+		out = append(out, s.ReconcileErr)
+	}
 	for _, o := range s.Outcomes {
 		if o.Err != nil {
 			out = append(out, o.Err)
@@ -91,6 +104,13 @@ func (a *Agent) ReceiveCycle(ctx context.Context) (ReceiveSummary, error) {
 	}
 
 	var summary ReceiveSummary
+
+	// PASSO 0 — desfechos que já aconteceram e não chegaram a ser publicados têm precedência sobre
+	// trabalho novo: enquanto não saem, existe objeto no bucket que ninguém consegue interpretar.
+	// Não aborta o ciclo — o que falhou em publicar não pode impedir o que ainda vai chegar.
+	republicados, err := a.ReconcilePending(ctx)
+	summary.Republicados = republicados
+	summary.ReconcileErr = err
 
 	// O início da janela é marcado ANTES de acionar o cliente, e a ordem é o que dá sentido à
 	// janela: só assim toda linha que o cliente escrever nesta execução cai depois dela. Marcar
@@ -324,8 +344,11 @@ func (a *Agent) publishReception(
 		out.Err = errors.Join(out.Err, err)
 		return
 	}
-	if err := a.store.Put(ctx, out.StatusKey, body); err != nil {
-		out.Err = errors.Join(out.Err, fmt.Errorf("publicar recepção em %q: %w", out.StatusKey, err))
+	// Passa pelo registro de pendências porque o `Archive` que vem logo depois tira o arquivo da
+	// pasta de ENTRADA: sem retomada, uma falha aqui deixaria o objeto em `retorno/` sem envelope, e
+	// o ciclo seguinte nem veria o arquivo para tentar de novo.
+	if err := a.publishEnvelope(ctx, out.StatusKey, out.FileName, body); err != nil {
+		out.Err = errors.Join(out.Err, err)
 	}
 }
 
@@ -413,8 +436,8 @@ func (a *Agent) receiveDuplicate(
 		out.Err = errors.Join(out.Err, err)
 		return out
 	}
-	if err := a.store.Put(ctx, out.StatusKey, body); err != nil {
-		out.Err = errors.Join(out.Err, fmt.Errorf("publicar recepção duplicada em %q: %w", out.StatusKey, err))
+	if err := a.publishEnvelope(ctx, out.StatusKey, name, body); err != nil {
+		out.Err = errors.Join(out.Err, err)
 		return out
 	}
 

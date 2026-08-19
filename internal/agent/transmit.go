@@ -87,6 +87,10 @@ type Agent struct {
 	// reception é o índice do que já foi recebido. Nil enquanto o ciclo de recepção não for usado —
 	// e o ciclo recusa rodar sem ele, em vez de operar sem memória do que já chegou.
 	reception ledger.ReceptionIndex
+	// pending registra envelopes cuja publicação não se confirmou, para que o ciclo seguinte os
+	// republique. Nil publica direto, sem retomada — comportamento anterior, mantido para quem monta
+	// o agente sem ele; produção sempre configura.
+	pending ledger.PendingEnvelopes
 }
 
 // Option ajusta o agente na construção.
@@ -99,6 +103,14 @@ type Option func(*Agent)
 // WithReceptionIndex liga o índice de recepção.
 func WithReceptionIndex(idx ledger.ReceptionIndex) Option {
 	return func(a *Agent) { a.reception = idx }
+}
+
+// WithPendingEnvelopes liga a retomada de publicações não confirmadas.
+//
+// Sem ele o agente publica direto e uma falha de publicação deixa o objeto no bucket sem desfecho —
+// indistinguível, para quem consome, de um objeto que nunca deveria ter entrado.
+func WithPendingEnvelopes(p ledger.PendingEnvelopes) Option {
+	return func(a *Agent) { a.pending = p }
 }
 
 // New monta o agente.
@@ -128,13 +140,24 @@ type Outcome struct {
 
 // Summary reúne o ciclo inteiro.
 type Summary struct {
-	Outcomes []Outcome
+	// Republicados conta envelopes de ciclos anteriores cuja publicação só se confirmou agora.
+	// Diferente de zero significa que houve remessa transmitida sem confirmação até esta passada.
+	Republicados int
+	// ReconcileErr é o que falhou ao republicar — sobre um desfecho antigo, não sobre a fila de agora.
+	ReconcileErr error
+	Outcomes     []Outcome
 }
 
 // Errs devolve os erros acumulados. Um objeto problemático não interrompe os demais: numa fila de
 // pagamentos, deixar de processar os arquivos bons por causa de um ruim é o comportamento errado.
+//
+// A falha de reconciliação entra aqui porque precisa fazer o ciclo sair com erro: uma remessa que
+// saiu e cujo desfecho nunca chegou ao bucket é a pendência mais cara que este agente pode ter.
 func (s Summary) Errs() []error {
 	var out []error
+	if s.ReconcileErr != nil {
+		out = append(out, s.ReconcileErr)
+	}
 	for _, o := range s.Outcomes {
 		if o.Err != nil {
 			out = append(out, o.Err)
@@ -145,14 +168,27 @@ func (s Summary) Errs() []error {
 
 // TransmitCycle roda uma passada sobre o prefixo de saída.
 func (a *Agent) TransmitCycle(ctx context.Context) (Summary, error) {
+	// PASSO 0 — republicar desfechos de ciclos anteriores que não chegaram ao bucket. Vem antes de
+	// listar a fila porque uma remessa já transmitida e sem confirmação publicada é dívida mais
+	// antiga que qualquer arquivo novo — e ela já custou dinheiro.
+	republicados, reconcileErr := a.ReconcilePending(ctx)
+
 	keys, err := a.store.List(ctx, a.cfg.Prefixes.Outbound)
 	if err != nil {
 		// Falha ao LISTAR aborta o ciclo, ao contrário de falha num objeto: sem a listagem não se
 		// sabe o que existe, e prosseguir seria operar sobre um mundo imaginário.
-		return Summary{}, fmt.Errorf("listar prefixo de saída: %w", err)
+		//
+		// O erro da reconciliação viaja junto: ele é sobre um desfecho que continua sem sair, e
+		// perdê-lo aqui esconderia o órfão atrás de uma falha de listagem.
+		return Summary{Republicados: republicados, ReconcileErr: reconcileErr},
+			fmt.Errorf("listar prefixo de saída: %w", err)
 	}
 
-	summary := Summary{Outcomes: make([]Outcome, 0, len(keys))}
+	summary := Summary{
+		Republicados: republicados,
+		ReconcileErr: reconcileErr,
+		Outcomes:     make([]Outcome, 0, len(keys)),
+	}
 	for _, key := range keys {
 		summary.Outcomes = append(summary.Outcomes, a.handle(ctx, key))
 	}
@@ -423,8 +459,11 @@ func (a *Agent) publish(ctx context.Context, out *Outcome, env envelope.Envelope
 		out.Err = errors.Join(out.Err, err)
 		return
 	}
-	if err := a.store.Put(ctx, key, body); err != nil {
-		out.Err = errors.Join(out.Err, fmt.Errorf("publicar status em %q: %w", key, err))
+	// A publicação passa pelo registro de pendências: o `segregate` que vem logo depois move o
+	// objeto para fora da fila, e sem retomada uma falha aqui deixaria uma remessa transmitida sem
+	// confirmação nenhuma — sobre um pagamento que já aconteceu.
+	if err := a.publishEnvelope(ctx, key, out.FileName, body); err != nil {
+		out.Err = errors.Join(out.Err, err)
 	}
 }
 

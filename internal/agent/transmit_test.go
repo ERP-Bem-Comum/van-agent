@@ -84,11 +84,18 @@ func newHarness(t *testing.T) *harness {
 	store := bucket.NewMemory()
 	prefixes := bucket.DefaultPrefixes()
 
+	// Registro de pendências no harness principal para que TODA a suíte rode o caminho de produção:
+	// um harness que publicasse direto verificaria um agente que não existe na instalação.
+	pending, err := ledger.NewFilePendingEnvelopes(filepath.Join(root, "ledger", "pendentes"))
+	if err != nil {
+		t.Fatalf("registro de pendências: %v", err)
+	}
+
 	ag, err := agent.New(store, led, fake, sp, agent.Config{
 		Prefixes:    prefixes,
 		NamePattern: namePattern,
 		Clock:       func() time.Time { return now },
-	})
+	}, agent.WithPendingEnvelopes(pending))
 	if err != nil {
 		t.Fatalf("montar agente: %v", err)
 	}

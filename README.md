@@ -44,16 +44,21 @@ O **cliente STCP continua sendo um duplo** nos testes, e continua sendo pela raz
 A ordem das operações é a correção deste componente, não preferência de estilo:
 
 ```
+0. republicar pendências  ← desfechos de ciclos anteriores que não chegaram ao bucket
 1. gravar a intenção      ← durável, ANTES de qualquer coisa tocar a pasta de SAÍDA
 2. depositar na SAÍDA     ← a partir daqui o cliente pode enviar a qualquer momento (§5, p.13)
 3. acionar o cliente
 4. ler a evidência física ← sumiu da SAÍDA e apareceu em BACKUP? (ADR-0061 §2)
 5. registrar o desfecho
-6. publicar o status
+6. publicar o status      ← pendência gravada ANTES da tentativa, limpa após confirmar
 7. mover o objeto
 ```
 
 Inverter 1 e 2 abriria a janela que este componente existe para fechar: uma queda entre depositar e registrar deixaria um arquivo na fila do banco sem que o agente soubesse — e o próximo ciclo, vendo o bucket intacto, depositaria de novo.
+
+**O passo 6 registra a pendência antes de tentar, e a limpa só depois de confirmar.** Sem isso, o passo 7 movia o objeto para fora da fila mesmo quando a publicação falhava: o registro já dizia `done`, nada voltava a passar por ali, e a remessa ficava **transmitida sem confirmação nenhuma** — sobre um pagamento que já tinha acontecido. O passo 0 é o par disso: o que ficou pendente sai antes de qualquer trabalho novo, porque é dívida mais antiga e já custou dinheiro.
+
+O corpo republicado é o **original, byte a byte**. O desfecho não mudou — o que falhou foi a publicação. Reconstruí-lo afirmaria outra coisa, e nem seria possível: o log daquele ciclo e o relógio daquele momento não existem mais. Por isso o registro guarda os bytes, e não os dados para remontá-los.
 
 O registro de intenção (`internal/ledger`) responde as três perguntas do ciclo:
 
@@ -141,15 +146,18 @@ Traz o que o banco enviou e o deposita no prefixo de retorno. **É o único cicl
 A ordem é **inversa** à da transmissão, e a inversão é deliberada:
 
 ```
+0. republicar pendências      ← envelopes de ciclos anteriores que não chegaram ao bucket
 1. acionar o cliente          (modo R)
-2. ler o log do ciclo         ← a evidência de origem
+2. ler o log do ciclo         ← a evidência de origem, filtrada pela janela desta execução
 3. listar a pasta de ENTRADA
 4. por arquivo: depositar no bucket, DEPOIS registrar
-5. publicar o envelope
+5. publicar o envelope        ← pendência gravada ANTES da tentativa, limpa após confirmar
 6. tirar o arquivo da pasta de entrada
 ```
 
 Na transmissão, registrar antes é o que impede pagar duas vezes. Aqui o risco é o oposto — **perder evidência de um pagamento** —, e registrar antes de depositar abriria exatamente essa janela: uma queda entre o registro e o depósito faria o ciclo seguinte reconhecer o conteúdo como já recebido e nunca depositá-lo.
+
+**Os passos 0 e 5 fecham o órfão de envelope.** O passo 6 tira o arquivo da pasta de ENTRADA mesmo quando a publicação falha — e como o índice já diz `done`, o ciclo seguinte **nem vê o arquivo** para tentar de novo. Sem a pendência, o objeto ficaria em `retorno/` sem envelope, permanentemente. Do lado de quem consome isso é pior do que parece: um objeto sem envelope é indistinguível de um objeto que nunca deveria ter entrado, e as duas observações pedem ações opostas.
 
 **Proveniência.** A caixa é do **convênio**, não da nossa remessa: chegam arquivos de lotes que não são nossos. O critério de origem é o **log do ciclo** — as linhas de recepção dizem o que aquela execução recebeu, e vêm do cliente do banco, não de um palpite sobre o nome do arquivo (que é atribuído pelo banco, não por nós). O envelope carrega nome, **SHA-256 do conteúdo**, as linhas cruas que correlacionam e o carimbo, para que o core-api possa aplicar a regra dele: só processa objeto que tenha envelope correspondente; o que aparecer sem envelope vai para quarentena visível.
 
@@ -286,7 +294,8 @@ internal/
   bucket/               fronteira com o object storage (interface + duplo + adapter S3)
   config/               leitura do ambiente
   envelope/             o contrato do status/
-  ledger/               a intenção gravada antes de transmitir
+  ledger/               a intenção antes de transmitir, o índice do que já foi recebido
+                        e os envelopes cuja publicação ainda não se confirmou
   spool/                pastas do cliente (SAÍDA, BACKUP, LOG) — a evidência física
   stcp/                 linha de comando (§6) e log posicional (§12)
     stcpfake/           duplo do cliente, fiel ao que o manual documenta

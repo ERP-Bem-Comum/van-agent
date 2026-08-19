@@ -131,12 +131,18 @@ func cycle(mode string, buildStore storeBuilder) int {
 		return exitConfig
 	}
 
+	pending, err := ledger.NewFilePendingEnvelopes(filepath.Join(cfg.LedgerDir, "pendentes"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "registro de envelopes pendentes: %v\n", err)
+		return exitConfig
+	}
+
 	ag, err := agent.New(store, led, client, sp, agent.Config{
 		Prefixes:      cfg.Prefixes,
 		NamePattern:   cfg.NamePattern,
 		NameMaxLength: cfg.NameMaxLength,
 		Clock:         time.Now,
-	})
+	}, agent.WithPendingEnvelopes(pending))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "montar agente: %v\n", err)
 		return exitConfig
@@ -208,12 +214,19 @@ func receive() int {
 		return exitConfig
 	}
 
+	// Mesmo raciocínio do índice: diretório próprio, porque aqui se indexa a CHAVE do envelope.
+	pending, err := ledger.NewFilePendingEnvelopes(filepath.Join(cfg.LedgerDir, "pendentes"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "registro de envelopes pendentes: %v\n", err)
+		return exitConfig
+	}
+
 	ag, err := agent.New(store, led, client, sp, agent.Config{
 		Prefixes:      cfg.Prefixes,
 		NamePattern:   cfg.NamePattern,
 		NameMaxLength: cfg.NameMaxLength,
 		Clock:         time.Now,
-	}, agent.WithReceptionIndex(index))
+	}, agent.WithReceptionIndex(index), agent.WithPendingEnvelopes(pending))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "montar agente: %v\n", err)
 		return exitConfig
@@ -235,6 +248,15 @@ func receive() int {
 
 func reportReception(summary agent.ReceiveSummary) {
 	fmt.Printf("modo recepcao concluído · arquivos na pasta de entrada: %d\n", len(summary.Outcomes))
+	if summary.Republicados > 0 {
+		fmt.Printf("⚠️  envelopes de ciclos anteriores republicados agora: %d\n", summary.Republicados)
+	}
+	if !summary.LogDoCicloLido {
+		// Não é erro, e por isso precisa ser dito: o ciclo funciona sem o log, mas nenhuma correlação
+		// deste ciclo é confiável, e a causa costuma ser o padrão do log apontando para o lugar errado.
+		fmt.Println("⚠️  o log DESTA execução não foi lido; nenhuma ausência de correlação abaixo " +
+			"diz respeito ao arquivo — conferir VAN_AGENT_STCP_TRANSFER_LOG_GLOB e a pasta de log")
+	}
 	for _, o := range summary.Outcomes {
 		correlacao := "sem correlação no log"
 		if o.Correlated {
@@ -262,6 +284,12 @@ func resumoDoHash(sum string) string {
 func report(mode, storeLabel string, pattern *regexp.Regexp, maxLen int, summary agent.Summary) {
 	fmt.Printf("modo %s concluído · %s · padrão de nome: %s · teto de comprimento: %s\n",
 		mode, storeLabel, pattern, limitOrNone(maxLen))
+	if summary.Republicados > 0 {
+		// Sai só quando houve, e destacado: republicação significa que uma remessa transmitida ficou
+		// sem desfecho publicado até agora. É informação sobre um ciclo ANTERIOR, e some da vista se
+		// aparecer como mais uma linha de rotina.
+		fmt.Printf("⚠️  envelopes de ciclos anteriores republicados agora: %d\n", summary.Republicados)
+	}
 	fmt.Printf("objetos na fila: %d\n", len(summary.Outcomes))
 	for _, o := range summary.Outcomes {
 		fmt.Printf("  %-40s situação=%-12s cliente acionado=%v\n",

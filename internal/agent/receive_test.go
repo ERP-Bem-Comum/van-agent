@@ -97,11 +97,19 @@ func newReceiveHarness(t *testing.T) *receiveHarness {
 	// O relógio lê do harness a cada chamada: os testes de duplicidade precisam encenar ciclos em
 	// momentos DIFERENTES, e um relógio congelado na construção faria duas recepções distintas
 	// caírem na mesma chave — escondendo justamente o que elas verificam.
+	// O registro de pendências entra aqui — e não só nos testes que o exercitam — para que TODA a
+	// suíte rode o caminho que produção roda. Um harness sem ele verificaria um agente que não
+	// existe na instalação.
+	pending, err := ledger.NewFilePendingEnvelopes(filepath.Join(root, "ledger", "pendentes"))
+	if err != nil {
+		t.Fatalf("registro de pendências: %v", err)
+	}
+
 	ag, err := agent.New(store, led, fake, sp, agent.Config{
 		Prefixes:    prefixes,
 		NamePattern: namePattern,
 		Clock:       func() time.Time { return h.now },
-	}, agent.WithReceptionIndex(index))
+	}, agent.WithReceptionIndex(index), agent.WithPendingEnvelopes(pending))
 	if err != nil {
 		t.Fatalf("montar agente: %v", err)
 	}
