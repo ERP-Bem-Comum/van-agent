@@ -614,3 +614,74 @@ func TestTeto_EnvelopeDistingueRecusaDoTransporteDeRecusaDoBanco(t *testing.T) {
 		t.Errorf("recusa do banco não pode carregar código de nomenclatura; veio: %q", recusadoLa.Detalhe)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Uma chave de remessa por arquivo, por mais ciclos que rodem
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A trava no nível do CICLO, e não da função.
+//
+// O core-api resolve conflito entre dois envelopes do mesmo arquivo pela ordem LEXICOGRÁFICA da
+// chave: vence o primeiro, `executadoEm` não é consultado, e o agregado recusa a segunda mudança em
+// qualquer direção — inclusive promoção de falha para sucesso (medido por eles em 19/08). Isso só é
+// seguro porque o agente publica UMA chave de remessa por arquivo, sempre a mesma.
+//
+// `TestCA3_DuplicadoPublicaSobChaveDistintaSemApagarOOriginal` já cobre que o duplicado não
+// sobrescreve — mas ele BUSCA por `envelope.Key(...)`, então acompanharia a mudança se a chave
+// passasse a variar: concordaria com o defeito em vez de o denunciar. Aqui as chaves são
+// classificadas pela FORMA, do mesmo jeito que o consumidor faz, sem perguntar ao produtor qual é a
+// chave certa.
+func TestUmaUnicaChaveDeRemessaPorArquivoAposVariosCiclos(t *testing.T) {
+	h := newHarness(t)
+
+	// Três ciclos com o MESMO nome. Do segundo em diante é o caminho do reprocessamento: devolver um
+	// objeto à fila com o nome já concluído, que o épico #6 registra como armadilha conhecida.
+	for range 3 {
+		h.queue(remittanceName, remittanceContent)
+		h.run()
+	}
+
+	var remessa, duplicado, recepcao, outras []string
+	for _, k := range h.store.Keys() {
+		if !strings.HasPrefix(k, "status/") {
+			continue
+		}
+		switch {
+		case strings.Contains(k, ".duplicado-"):
+			duplicado = append(duplicado, k)
+		case strings.HasPrefix(k, "status/recepcao-"):
+			recepcao = append(recepcao, k)
+		case strings.HasSuffix(k, ".json"):
+			remessa = append(remessa, k)
+		default:
+			outras = append(outras, k)
+		}
+	}
+
+	if len(remessa) != 1 {
+		t.Fatalf("esperava EXATAMENTE 1 chave de remessa depois de 3 ciclos, vieram %d: %v\n"+
+			"Com mais de uma, o core-api passa a escolher desfecho pela ordem alfabética da chave — "+
+			"e ele recusa a segunda mudança inclusive de falha para sucesso.", len(remessa), remessa)
+	}
+	if remessa[0] != "status/"+remittanceName+".json" {
+		t.Errorf("a chave de remessa mudou de forma: %q", remessa[0])
+	}
+
+	// Houve reprocessamento, então tem de haver rastro dele — e sob chave PRÓPRIA, nunca na chave da
+	// remessa.
+	//
+	// A contagem não é afirmada de propósito. O relógio deste harness é congelado, e duas tentativas
+	// recusadas no MESMO segundo produzem a mesma chave de duplicado: a segunda sobrescreve a
+	// primeira. Isso é limitação conhecida e aceita — o que o carimbo protege é o status ORIGINAL da
+	// remessa (que é o que faria alguém reenviar um pagamento já feito), não a distinção entre dois
+	// duplicados, que carregam a mesma informação.
+	if len(duplicado) == 0 {
+		t.Error("os reprocessamentos não deixaram rastro; sem eles ninguém sabe que houve tentativa recusada")
+	}
+	if len(recepcao) != 0 {
+		t.Errorf("um ciclo de transmissão não publica status de recepção; veio %v", recepcao)
+	}
+	if len(outras) != 0 {
+		t.Errorf("chave em status/ que o consumidor não sabe classificar: %v", outras)
+	}
+}

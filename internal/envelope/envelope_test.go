@@ -7,6 +7,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,83 @@ func TestChaveDeRecepcaoDistingueArquivosDoMesmoCiclo(t *testing.T) {
 	for _, k := range []string{primeira, segunda} {
 		if !strings.HasPrefix(k, envelope.StatusPrefix+"recepcao-") {
 			t.Errorf("chave %q perdeu o prefixo que o consumidor usa para classificá-la", k)
+		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A chave de remessa é função SÓ do nome — e o consumidor depende disso
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Por que estes testes existem, e por que a expectativa é montada à mão.
+//
+// O core-api resolve conflito entre dois envelopes do mesmo arquivo pela ordem LEXICOGRÁFICA da
+// chave: vence o primeiro, `executadoEm` não é consultado, e o agregado recusa a segunda mudança em
+// qualquer direção — inclusive promoção de falha para sucesso (medido por eles em 19/08). Isso é
+// seguro hoje por uma razão que mora AQUI: `Key` não recebe relógio, então não há como o mesmo nome
+// produzir duas chaves de remessa.
+//
+// Se alguém adicionar carimbo a `Key` — pedido plausível, para parar de sobrescrever histórico —, a
+// correção do outro lado quebra em SILÊNCIO, do outro lado da fronteira. Estes testes transformam
+// isso em vermelho aqui.
+//
+// A chave esperada é escrita LITERALMENTE, sem chamar `Key`, de propósito: um teste que montasse a
+// expectativa com a própria função acompanharia a mudança e concordaria com o defeito.
+
+// A trava mais forte é de COMPILAÇÃO, não de asserção.
+//
+// `Key` recebe um nome e devolve uma chave, e nada mais. Se ela ganhar um segundo parâmetro — um
+// relógio, um contador de tentativa, um sufixo —, esta linha para de compilar. Diferente de uma
+// asserção, isso não pode ser "atualizado junto" por quem está fazendo a mudança sem parar para
+// pensar: o build quebra antes de qualquer teste rodar.
+//
+// As outras duas recebem relógio de propósito, e a assimetria é o contrato: só as chaves que
+// PRECISAM não colidir carregam tempo.
+var (
+	_ func(string) string            = envelope.Key
+	_ func(string, time.Time) string = envelope.DuplicateKey
+	_ func(string, time.Time) string = envelope.ReceptionKey
+)
+
+func TestChaveDeRemessaEhFuncaoSoDoNome(t *testing.T) {
+	const nome = "PAG_000000.20260818120000_0001.REM"
+
+	if got, want := envelope.Key(nome), "status/"+nome+".json"; got != want {
+		t.Fatalf("Key(%q) = %q, esperava %q — a chave de remessa deriva SÓ do nome", nome, got, want)
+	}
+}
+
+// A asserção que pega a regressão de verdade: nenhum carimbo dentro da chave de remessa.
+//
+// `StampLayout` renderiza como 8 dígitos, `T`, 6 dígitos, `Z`. Se um carimbo entrar na chave — por
+// qualquer motivo, com qualquer formato desta família — esta asserção cai, mesmo que a igualdade
+// literal acima seja atualizada junto pela mesma mão.
+func TestChaveDeRemessaNaoCarregaCarimbo(t *testing.T) {
+	carimbo := regexp.MustCompile(`[0-9]{8}T[0-9]{6}Z`)
+
+	for _, nome := range []string{
+		"PAG_000000.20260818120000_0001.REM",
+		"PAG_000000_000042.REM",
+		"X.REM",
+	} {
+		key := envelope.Key(nome)
+		// O nome pode conter dígitos e ponto, mas nunca a forma do carimbo — que é o que o
+		// consumidor usaria para distinguir duas chaves do mesmo arquivo.
+		if carimbo.MatchString(strings.TrimPrefix(strings.TrimSuffix(key, ".json"), "status/"+nome)) {
+			t.Errorf("a chave de remessa de %q ganhou carimbo: %q — o consumidor passa a ter duas "+
+				"chaves para o mesmo arquivo, e ele decide por ordem lexicográfica", nome, key)
+		}
+	}
+
+	// E as outras duas famílias carregam carimbo de propósito: é o que as torna distintas entre si e
+	// da chave de remessa. Se ESTAS perderem o carimbo, um duplicado passa a sobrescrever o original.
+	at := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	for nome, key := range map[string]string{
+		"duplicado": envelope.DuplicateKey("X.REM", at),
+		"recepção":  envelope.ReceptionKey("X.RET", at),
+	} {
+		if !carimbo.MatchString(key) {
+			t.Errorf("a chave de %s perdeu o carimbo (%q); sem ele ela colide e apaga a anterior", nome, key)
 		}
 	}
 }
