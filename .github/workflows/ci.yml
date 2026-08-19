@@ -68,10 +68,14 @@ jobs:
         # A máquina de produção é Windows/amd64 e ninguém executa a suíte lá. Compilar a cada
         # mudança é o mínimo: pega o que não compila para o alvo, que é o erro que só apareceria na
         # hora de instalar.
+        #
+        # `./...` e não só o agente: o cliente encenado também roda na plataforma de destino — é ele
+        # que sustenta a simulação —, e um binário de apoio que não compila lá quebra o ambiente de
+        # quem for montá-la, no momento em que ele mais precisa que funcione.
         env:
           GOOS: windows
           GOARCH: amd64
-        run: go build -o /dev/null ./cmd/van-agent
+        run: go build -o /dev/null ./...
 
       - name: o golden versionado bate com o que o código produz
         # O golden é gerado, nunca editado à mão. Regerar e comparar é o que impede que o contrato

@@ -121,6 +121,7 @@ pelo consumidor.
 | `internal/spool` | pastas SAÍDA/BACKUP/LOG — a evidência física; `Place` escreve fora e renomeia para dentro |
 | `internal/stcp` | linha de comando (§6, p.14) e parser do log posicional de 10 campos (§12, p.30) |
 | `internal/stcp/stcpfake` | duplo do cliente, fiel ao manual (Succeed/Reject/Vanish/Crash) |
+| `cmd/stcp-encenado` | o `stcpfake` como **executável**, para simulação fora da suíte. **Não transmite**, e recusa rodar sem `STCP_ENCENADO_CONFIRMO=nao-transmite-nada` — um falso cliente é perigoso porque parece funcionar |
 | `internal/config` | leitura do ambiente; falha no **boot**, nunca no meio de um ciclo |
 
 ## Configuração
