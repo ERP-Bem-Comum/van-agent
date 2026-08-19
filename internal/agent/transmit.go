@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ERP-Bem-Comum/van-agent/internal/bucket"
 	"github.com/ERP-Bem-Comum/van-agent/internal/envelope"
@@ -42,6 +43,19 @@ type Config struct {
 	// outra coisa que esteja na pasta. A primeira é nossa; a segunda é do cliente. Confiar só na
 	// nossa deixaria um arquivo largado na pasta ser enviado por uma execução manual.
 	NamePattern *regexp.Regexp
+	// NameMaxLength é o teto de comprimento do nome. Zero significa SEM trava.
+	//
+	// Não é constante compilada porque o valor efetivo não é nosso: o manual documenta um erro
+	// dedicado a nome longo (1101, §11 p.26), e o procedimento que ele descreve é condicional —
+	// depende de a opção de nome longo estar habilitada na instalação E de o parceiro incorporá-la.
+	// Nenhuma das duas condições foi verificada por medição, e um número fixo no binário
+	// congelaria um palpite sobre um acordo bilateral que pode mudar sem nos avisar.
+	//
+	// A trava é para RECUSAR, nunca para truncar. Truncar mudaria a chave de idempotência depois de
+	// a intenção já estar gravada, e dois nomes distintos truncados para o mesmo prefixo colidiriam
+	// no registro — a segunda remessa seria lida como duplicado, NÃO seria transmitida, e receberia
+	// um envelope com a situação da primeira.
+	NameMaxLength int
 	// Clock existe para que o teste controle os carimbos. Em produção é `time.Now`.
 	Clock func() time.Time
 }
@@ -56,6 +70,9 @@ func (c Config) Validate() error {
 	}
 	if c.Clock == nil {
 		return errors.New("relógio não configurado")
+	}
+	if c.NameMaxLength < 0 {
+		return fmt.Errorf("teto de comprimento do nome negativo: %d", c.NameMaxLength)
 	}
 	return nil
 }
@@ -140,7 +157,20 @@ func (a *Agent) handle(ctx context.Context, key string) Outcome {
 	// CA7 — o filtro de nomenclatura. Um arquivo que não é nosso não vira remessa por engano.
 	if !a.cfg.NamePattern.MatchString(name) {
 		return a.publishAndSegregate(ctx, out, envelope.Failed,
-			fmt.Sprintf("nome %q não casa com o padrão de remessa; nada foi transmitido", name), nil, nil)
+			refusalDetail(RefusalNamePattern,
+				fmt.Sprintf("nome %q não casa com o padrão de remessa", name)), nil, nil)
+	}
+
+	// A trava de comprimento vem DEPOIS do padrão de propósito: primeiro se decide se o arquivo é
+	// nosso, e só então se o nome dele passa no transporte. A ordem inversa reclamaria do tamanho de
+	// um arquivo que nem deveria estar sendo considerado.
+	if excedente, limite, excede := a.nameTooLong(name); excede {
+		return a.publishAndSegregate(ctx, out, envelope.Failed,
+			refusalDetail(RefusalNameLength, fmt.Sprintf(
+				"nome %q tem %d caracteres e excede o limite de %d configurado para esta instalação; "+
+					"o nome NÃO é truncado — truncar mudaria a chave de idempotência e faria nomes "+
+					"distintos colidirem no registro",
+				name, excedente, limite)), nil, nil)
 	}
 
 	entry, found, err := a.led.Lookup(name)
@@ -403,4 +433,44 @@ func FileFilter(fileName string) string {
 	}
 	b.WriteByte('$')
 	return b.String()
+}
+
+// Códigos de recusa do TRANSPORTE — as que acontecem antes de o cliente STCP ser acionado.
+//
+// Eles existem porque "recusado por nomenclatura" e "recusado pelo banco" levam a ações diferentes:
+// a primeira se conserta mudando o nome no emissor, a segunda exige olhar o convênio. O envelope já
+// distingue as duas implicitamente (recusa do transporte não tem `exitCode` nem linha de log,
+// porque o cliente não chegou a rodar), mas implícito é o que ninguém lê às três da manhã.
+//
+// Eles viajam no `detalhe`, e NÃO como campo novo: um campo novo mudaria a forma do envelope, e o
+// contrato do `status/` só muda com as duas metades acordando junto (o golden é cobrado dos dois
+// lados). Se o core-api precisar disso estruturado um dia, aí sim vira mudança de contrato.
+const (
+	// RefusalNamePattern — o nome não casa com o padrão de remessa. O arquivo não é nosso.
+	RefusalNamePattern = "recusa-nomenclatura:padrao"
+	// RefusalNameLength — o nome é nosso, mas excede o teto configurado para a instalação.
+	RefusalNameLength = "recusa-nomenclatura:comprimento"
+)
+
+// refusalDetail monta o detalhe de uma recusa do transporte.
+//
+// A frase final é sempre a mesma, e é a informação que decide o que fazer: NADA chegou ao banco.
+// Sem ela, "falha" convida alguém a investigar o convênio por um problema que está no nome.
+func refusalDetail(code, reason string) string {
+	return fmt.Sprintf("[%s] %s; recusado pelo TRANSPORTE antes de acionar o cliente STCP — "+
+		"nenhuma tentativa chegou ao banco", code, reason)
+}
+
+// nameTooLong reporta o comprimento, o limite e se ele foi excedido.
+//
+// Conta CARACTERES, que é como o manual descreve o teto (§11, p.26) — mas também recusa se os BYTES
+// excederem. Os dois só divergem fora do conjunto que o emissor produz (`[A-Z0-9._]`), e na
+// divergência a escolha é a conservadora: erra-se para menos, e um nome recusado aqui é visível,
+// enquanto um nome recusado pelo banco chega depois de o arquivo já estar na fila.
+func (a *Agent) nameTooLong(name string) (length, limit int, tooLong bool) {
+	if a.cfg.NameMaxLength <= 0 {
+		return 0, 0, false
+	}
+	chars := utf8.RuneCountInString(name)
+	return chars, a.cfg.NameMaxLength, chars > a.cfg.NameMaxLength || len(name) > a.cfg.NameMaxLength
 }

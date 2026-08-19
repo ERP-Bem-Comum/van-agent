@@ -54,6 +54,10 @@ type Config struct {
 	LedgerDir string
 	// NamePattern decide o que é remessa nossa (CA7).
 	NamePattern *regexp.Regexp
+	// NameMaxLength é o teto de comprimento do nome de remessa. Zero (o default) significa SEM
+	// trava, e a ausência é deliberada: o teto efetivo depende da instalação e do parceiro, e um
+	// default que recusasse por engano pararia a fila inteira sem que ninguém tivesse pedido.
+	NameMaxLength int
 }
 
 // Missing lista variáveis obrigatórias ausentes, para que o boot diga TODAS de uma vez em vez de
@@ -168,6 +172,15 @@ func Load() (Config, error) {
 	cfg.Client.Retries = retries
 	cfg.Client.RetryIntervalSeconds = interval
 
+	maxLen, err := lookupInt(agentPrefix, "NAME_MAX_LENGTH", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	if maxLen < 0 {
+		return Config{}, fmt.Errorf("%sNAME_MAX_LENGTH não pode ser negativo; veio %d", agentPrefix, maxLen)
+	}
+	cfg.NameMaxLength = maxLen
+
 	rawPattern := lookup(agentPrefix, "NAME_PATTERN", &missing)
 	if rawPattern != "" {
 		pattern, err := regexp.Compile(rawPattern)
@@ -236,6 +249,9 @@ func (c Config) Validate() error {
 	}
 	if c.NamePattern == nil {
 		return errors.New("padrão de nome de remessa não configurado")
+	}
+	if c.NameMaxLength < 0 {
+		return fmt.Errorf("teto de comprimento do nome negativo: %d", c.NameMaxLength)
 	}
 	return nil
 }

@@ -100,6 +100,22 @@ go build ./cmd/van-agent           # o binário
 GOOS=windows GOARCH=amd64 go build -o van-agent.exe ./cmd/van-agent   # compilação cruzada
 ```
 
+### Verificação contínua
+
+`.github/workflows/ci.yml` roda em todo push para `main` e em todo pull request, em dois jobs:
+
+| Job          | O que cobre                                                                                          |
+| :----------- | :---------------------------------------------------------------------------------------------------- |
+| `verificar`  | `go test ./...` · `go vet ./...` · `gofmt -l .` vazio · compilação cruzada para **windows/amd64** · o golden versionado bate com o que o código produz |
+| `integracao` | a mesma suíte com um **MinIO efêmero** de service, para que o adapter de object storage seja exercitado de verdade e não apenas pulado |
+
+**O que o CI deliberadamente NÃO cobre: execução na máquina Windows real.** O binário de produção é windows/amd64, e aqui ele apenas **compila** para esse alvo — toda a suíte roda em Linux. Nada substitui rodar lá, e este agente não tem staging: o que existe é a máquina de produção.
+
+Duas escolhas do arquivo que não são detalhe:
+
+- **Actions de terceiros fixadas por SHA, nunca por tag.** Uma tag é um ponteiro que o dono do repositório pode mover, e mover a tag de uma action que roda no nosso CI é execução de código arbitrário no pipeline de um componente que transmite pagamento. Ao atualizar, trocar o SHA e o comentário da versão juntos.
+- **Nenhuma credencial, endpoint ou nome de bucket real no arquivo.** As chaves do job de integração pertencem a um MinIO criado e destruído pelo próprio job; o bucket é criado pelo teste, com nome derivado do relógio.
+
 ### Teste de integração do armazenamento
 
 Os testes que falam com um object storage de verdade são **pulados** quando não há endpoint configurado — a suíte precisa continuar rodável numa máquina sem nuvem e sem rede. Para exercitá-los, aponte para qualquer S3-compatível:
@@ -144,6 +160,7 @@ Tudo por ambiente; nenhum default aponta para instalação real. São **dois con
 | `VAN_AGENT_NAME_PATTERN`                                   |     ✅      | precisa ancorar o nome inteiro (`^…$`) |
 | `VAN_AGENT_STCP_EXE` · `_INI` · `_PROFILE`                 |     ✅      | instalação do cliente                  |
 | `VAN_AGENT_STCP_OUTBOUND_DIR` · `_BACKUP_DIR` · `_LOG_DIR` |     ✅      | pastas do cliente                      |
+| `VAN_AGENT_NAME_MAX_LENGTH`                                |             | teto de comprimento do nome; **ausente ⇒ sem trava**. Ver abaixo |
 | `VAN_AGENT_STCP_RETRIES` · `_RETRY_INTERVAL_SECONDS`       |             | `-r` e `-t` (§6, p.14)                 |
 | `VAN_AGENT_STCP_TRANSFER_LOG_GLOB`                         |             | ver pendências                         |
 
@@ -157,6 +174,21 @@ Tudo por ambiente; nenhum default aponta para instalação real. São **dois con
 | `VAN_S3_ACCESS_KEY_ID` · `_SECRET_ACCESS_KEY`                                |             | **XOR é erro**: só uma delas ⇒ falha nomeando a que falta. **Ausentes as duas ⇒ cadeia de provedores (role da instância)** — é o caminho de produção |
 | `VAN_S3_FORCE_PATH_STYLE`                                                    |             | valor ilegível ⇒ falha. Ver a nota abaixo                                |
 | `VAN_S3_PREFIX_OUTBOUND` · `_PROCESSED` · `_FAILED` · `_RETURNS` · `_STATUS` |             | sem barra final ⇒ **normalizado** com barra; começando com barra ⇒ falha nomeando a variável |
+
+#### Teto de comprimento do nome
+
+O manual documenta um erro dedicado a nome longo (**1101**, §11 p.26), e o procedimento que ele descreve é **condicional**: depende de a opção de nome longo estar habilitada na instalação **e** de o parceiro incorporá-la. Nenhuma das duas condições foi verificada por medição — por isso o teto é **configuração**, não constante compilada, e por isso o default é **não travar**: um número fixo no binário congelaria um palpite sobre um acordo bilateral, e um default que recusasse por engano pararia a fila inteira sem que ninguém tivesse pedido.
+
+Com a trava ligada, um nome que a excede vai para o prefixo de falhas com status publicado, **sem que o cliente STCP seja acionado** e sem que o arquivo chegue a ser depositado na pasta de SAÍDA. O nome **não é truncado**: truncar mudaria a chave de idempotência depois de a intenção já estar gravada, e dois nomes distintos truncados para o mesmo prefixo colidiriam no registro — a segunda remessa seria lida como duplicado, **não seria transmitida**, e receberia um envelope com a situação da primeira.
+
+O envelope distingue as duas causas de recusa, porque elas levam a ações diferentes:
+
+| Recusa            | `exitCode` | `logTransferencia` | `detalhe`                                                       |
+| :---------------- | :--------- | :----------------- | :-------------------------------------------------------------- |
+| **do transporte** | `null`     | vazio              | começa com `[recusa-nomenclatura:padrao]` ou `[recusa-nomenclatura:comprimento]`, e diz que nenhuma tentativa chegou ao banco |
+| **do banco**      | preenchido | com as linhas do log | traz o código do §11 na linha crua                              |
+
+Os códigos viajam no `detalhe`, e **não** como campo novo: um campo novo mudaria a forma do envelope, e o contrato do `status/` só muda com as duas metades acordando junto.
 
 **Credencial não é o caminho de produção.** A autenticação é por role da instância (ADR-0061 §5) — nenhuma chave em disco, nenhuma em variável. O par estático existe para exercitar o adapter contra um endpoint local, e o valor **nunca aparece em log**: os tipos que o carregam redigem o segredo ao serem formatados.
 

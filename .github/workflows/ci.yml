@@ -1,0 +1,143 @@
+# Verificação de cada mudança.
+#
+# Por que este arquivo importa mais aqui do que num repositório comum: este agente é o único
+# componente que toca o cliente do banco, e ele NÃO tem staging — o que existe é a máquina de
+# produção. As duas defesas contra regressão são a suíte e o golden compartilhado, e enquanto nada
+# as executava automaticamente as duas eram opcionais na prática.
+#
+# O golden é contrato de DOIS lados: o core-api tem uma cópia e a cobra na suíte dele, que roda em
+# CI. O lado que PRODUZ o golden era justamente o que não tinha CI — e a assimetria significava que
+# uma divergência introduzida aqui só aparecia quando o outro repositório reclamasse.
+#
+# ⚠️ O que este workflow deliberadamente NÃO cobre: execução na máquina Windows real. O binário de
+# produção é windows/amd64 e aqui ele apenas COMPILA para esse alvo. Nada substitui rodar lá.
+#
+# Actions de terceiros são fixadas por SHA, nunca por tag móvel: uma tag é um ponteiro que o dono do
+# repositório pode mover, e mover a tag de uma action que roda no nosso CI é execução de código
+# arbitrário no pipeline de um componente que transmite pagamento. Ao atualizar, trocar o SHA e o
+# comentário da versão juntos.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Um push novo cancela a verificação anterior do mesmo ramo: o que importa é o estado final.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    name: suíte, vet, gofmt e compilação cruzada
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # A versão vem do go.mod: uma versão fixada aqui divergiria da que o repositório declara,
+          # e a divergência apareceria como um erro de compilação sem causa aparente.
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        # `gofmt -l` não devolve código de erro — ele lista arquivos. Sem esta checagem, um arquivo
+        # mal formatado passaria com o job verde.
+        run: |
+          arquivos=$(gofmt -l .)
+          if [ -n "$arquivos" ]; then
+            echo "::error::arquivos fora do formato padrão:"
+            echo "$arquivos"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # Os testes que falam com object storage são PULADOS aqui: este job roda sem endpoint, de
+        # propósito, para provar que a suíte continua rodável numa máquina sem nuvem e sem rede.
+        run: go test ./... -count=1
+
+      - name: compilação cruzada para a plataforma de destino
+        # A máquina de produção é Windows/amd64 e ninguém executa a suíte lá. Compilar a cada
+        # mudança é o mínimo: pega o que não compila para o alvo, que é o erro que só apareceria na
+        # hora de instalar.
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -o /dev/null ./cmd/van-agent
+
+      - name: o golden versionado bate com o que o código produz
+        # O golden é gerado, nunca editado à mão. Regerar e comparar é o que impede que o contrato
+        # com o core-api mude por descuido — a divergência apareceria aqui, e não quando o outro
+        # repositório reclamasse.
+        run: |
+          go test ./internal/envelope -update
+          if ! git diff --exit-code --quiet -- testdata/status-envelope.golden.json; then
+            echo "::error::o golden versionado diverge do que o código produz."
+            echo "Rode 'go test ./internal/envelope -update' E replique o arquivo no core-api"
+            echo "(tests/modules/financial/adapters/van/status-envelope.golden.json)."
+            echo "As duas metades do contrato mudam juntas."
+            git diff -- testdata/status-envelope.golden.json
+            exit 1
+          fi
+
+  integracao:
+    name: adapter de object storage contra S3-compatível
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: subir o MinIO
+        # ⚠️ NÃO dá para usar `services:` aqui, e a razão não é preferência: a imagem do MinIO exige
+        # o comando `server /data`, e `services` só aceita a imagem e flags do docker — nunca o
+        # comando. Declarado como service, o container sobe sem virar servidor, nada escuta na porta,
+        # e o job falha com um timeout que não diz nada sobre a causa.
+        #
+        # MinIO fala o mesmo protocolo que o S3, mudando só o endereçamento das chaves — é o que
+        # torna esta prova possível sem bucket de verdade e sem credencial de nuvem alguma.
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=chave-de-ci \
+            -e MINIO_ROOT_PASSWORD=segredo-de-ci-min-8-chars \
+            minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data
+
+      - name: esperar o MinIO responder
+        # A espera fica num step, e não num healthcheck do container: a imagem não garante ter uma
+        # ferramenta de health própria, e um healthcheck que falha por falta de binário derruba o job
+        # com um erro que não tem nada a ver com o código. O runner tem `curl`.
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "MinIO respondendo"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::MinIO não respondeu em 60s"
+          docker logs minio || true
+          exit 1
+
+      - name: suíte com endpoint configurado
+        # ⚠️ Estes valores são de um MinIO efêmero criado por este job. Nenhuma credencial real,
+        # nenhum endpoint real e nenhum nome de bucket real entra neste arquivo — este repositório é
+        # público, e o bucket de produção identifica o convênio. O bucket aqui é criado pelo próprio
+        # teste, com nome derivado do relógio.
+        env:
+          VAN_S3_ENDPOINT: http://localhost:9000
+          VAN_S3_REGION: us-east-1
+          VAN_S3_ACCESS_KEY_ID: chave-de-ci
+          VAN_S3_SECRET_ACCESS_KEY: segredo-de-ci-min-8-chars
+        run: go test ./... -count=1
