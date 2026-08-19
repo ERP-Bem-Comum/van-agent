@@ -14,7 +14,11 @@ package stcp
 
 import (
 	"strings"
+	"time"
 )
+
+// OccurredAtLayout decodifica o campo 1 do §12 (`YYYYMMDDhhmmss`).
+const OccurredAtLayout = "20060102150405"
 
 // Códigos de operação do campo 2 (§12, p.30).
 const (
@@ -77,6 +81,50 @@ type Record struct {
 
 // Succeeded reporta se a linha registra sucesso, conforme o campo 7.
 func (r Record) Succeeded() bool { return r.Result == ResultSuccess }
+
+// Time decodifica o campo 1 no fuso LOCAL, e o segundo retorno diz se deu.
+//
+// ⚠️ O fuso não é detalhe: quem escreve esta linha é o cliente do banco, rodando na mesma máquina
+// Windows que o agente, e o carimbo do §12 não traz indicação de zona — é a hora local do relógio
+// daquele computador. Interpretá-lo como UTC deslocaria toda linha pelo offset da máquina (três
+// horas, no nosso caso), e uma janela deslocada por três horas não rejeita o log de ontem: ela
+// rejeita o log de hoje.
+//
+// Linha ilegível devolve `false` em vez de erro, e o chamador decide. É a mesma tolerância que o
+// resto do parser já pratica: uma linha malformada degrada o diagnóstico, nunca aborta um ciclo que
+// já mexeu no mundo.
+func (r Record) Time() (time.Time, bool) {
+	t, err := time.ParseInLocation(OccurredAtLayout, r.OccurredAt, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// WithinWindow devolve as linhas cujo carimbo cai no intervalo [from, to], descartando o resto.
+//
+// É o que ancora a correlação no TEMPO, e não só no nome. Sem isto, "o log deste ciclo" é uma
+// afirmação que o código não sustenta: `ReadTransferLog` casa o log mais recente do padrão, e o
+// nome documentado começa por data (§7, p.15), ou seja, é diário. No primeiro ciclo do dia — antes
+// de o cliente escrever o log novo — o glob casa o log de ONTEM, e uma leitura bem-sucedida de um
+// log real não diz nada sobre o que acabou de acontecer.
+//
+// Linha SEM carimbo legível é DESCARTADA, e a escolha é conservadora de propósito: mantê-la
+// afirmaria pertencer a esta janela sem prova, que é o erro que este filtro existe para impedir.
+func WithinWindow(records []Record, from, to time.Time) []Record {
+	out := make([]Record, 0, len(records))
+	for _, r := range records {
+		t, ok := r.Time()
+		if !ok {
+			continue
+		}
+		if t.Before(from) || t.After(to) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
 
 // slice recorta um campo tolerando linha curta.
 //

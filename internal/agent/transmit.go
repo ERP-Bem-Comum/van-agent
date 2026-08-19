@@ -381,8 +381,14 @@ func (a *Agent) verdict(fileName string, exitCode *int, runErr error) (envelope.
 //
 // As linhas vão CRUAS para o envelope. A decodificação existe para escolher quais linhas importam,
 // nunca para substituí-las: se um offset estiver errado, quem investiga ainda tem o texto original.
+//
+// ⚠️ Aqui NÃO há filtro por janela de tempo, ao contrário da recepção, e a assimetria é deliberada.
+// Na transmissão o nome é escolhido por nós e é a chave de idempotência: um nome já concluído nunca
+// é retransmitido, então não existe a linha antiga homônima que a recepção precisa rejeitar. Além
+// disso o veredito da transmissão vem da EVIDÊNCIA FÍSICA (ADR-0061 §2), e estas linhas alimentam
+// só o diagnóstico — apertá-las aqui removeria contexto útil sem corrigir desfecho nenhum.
 func (a *Agent) transferLogFor(fileName string) []string {
-	raw, err := a.sp.ReadTransferLog()
+	raw, _, err := a.sp.ReadTransferLog()
 	if err != nil || raw == "" {
 		return nil
 	}

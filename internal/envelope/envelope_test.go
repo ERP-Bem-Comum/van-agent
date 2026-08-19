@@ -152,24 +152,57 @@ func buildGolden() goldenFile {
 						Sha256:         returnSum,
 						Chave:          "retorno/" + returnName,
 						Correlacionado: true,
+						LogDoCicloLido: true,
 					}),
 			},
 			{
 				// A caixa é do CONVÊNIO: chegam arquivos de lotes que não são nossos, e nem tudo
 				// casa com o log do ciclo. O que não casa entra ASSIM MESMO, declarado — descartar
 				// em silêncio um arquivo do banco é o desfecho que ninguém percebe.
-				Nome:                 "recepção sem correlação com o log do ciclo",
+				//
+				// Aqui o log DESTE ciclo foi lido: a ausência da linha é afirmação sobre o arquivo,
+				// e este é o único dos dois casos de não-correlação que sustenta uma suspeita.
+				Nome:                 "recepção sem correlação, com o log do ciclo lido",
 				Tipo:                 "reception",
 				ContaComoTransmissao: false,
 				Chave:                envelope.ReceptionKey(returnName, at),
 				Envelope: envelope.NewReception(returnName, at, envelope.Reception,
-					"arquivo encontrado na pasta de entrada SEM linha correspondente no log deste ciclo; "+
-						"depositado assim mesmo, com a origem declarada como não correlacionada",
+					"arquivo encontrado na pasta de entrada SEM linha correspondente no log deste "+
+						"ciclo, que FOI lido; depositado assim mesmo, com a origem declarada como não "+
+						"correlacionada — o cliente não registrou tê-lo recebido nesta execução",
 					intPtr(0), nil,
 					envelope.ReceptionInfo{
 						Sha256:         returnSum,
 						Chave:          "retorno/" + returnName,
 						Correlacionado: false,
+						LogDoCicloLido: true,
+					}),
+			},
+			{
+				// O MESMO `correlacionado: false` do caso acima, com significado oposto — e é por
+				// isso que `logDoCicloLido` existe.
+				//
+				// O nome do log começa por data (§7, p.15) e o padrão casa o mais recente: no
+				// primeiro ciclo do dia, antes de o cliente escrever o log novo, o agente lê com
+				// sucesso o log de ONTEM. Sem este campo o consumidor não teria como separar isto
+				// de uma origem não registrada, e represaria todo retorno do primeiro ciclo,
+				// diariamente. Aqui a não-correlação não diz nada sobre o arquivo: diz que a
+				// configuração do log precisa ser conferida.
+				Nome:                 "recepção sem o log do ciclo — o agente não sabe",
+				Tipo:                 "reception",
+				ContaComoTransmissao: false,
+				Chave:                envelope.ReceptionKey(returnName, at),
+				Envelope: envelope.NewReception(returnName, at, envelope.Reception,
+					"arquivo encontrado na pasta de entrada e depositado, mas o log DESTA execução "+
+						"não pôde ser lido (padrão sem correspondência, log ainda não escrito ou "+
+						"leitura que falhou); a ausência de correlação NÃO é indício sobre o arquivo "+
+						"— é sobre a configuração do log na instalação, e é ela que precisa ser conferida",
+					intPtr(0), nil,
+					envelope.ReceptionInfo{
+						Sha256:         returnSum,
+						Chave:          "retorno/" + returnName,
+						Correlacionado: false,
+						LogDoCicloLido: false,
 					}),
 			},
 			{
@@ -192,6 +225,7 @@ func buildGolden() goldenFile {
 						Sha256:         returnSum,
 						Chave:          "retorno/" + returnName,
 						Correlacionado: true,
+						LogDoCicloLido: true,
 						Duplicado:      true,
 						DuplicadoDe:    "retorno/" + returnName,
 					}),

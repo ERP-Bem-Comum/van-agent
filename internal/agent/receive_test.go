@@ -137,6 +137,19 @@ func (h *receiveHarness) run() agent.ReceiveSummary {
 	return sum
 }
 
+// desfechoDe acha o desfecho de um arquivo pelo nome. Um ciclo com mais de um arquivo não garante
+// ordem estável de interesse ao teste, e indexar por posição faria a asserção depender dela.
+func (h *receiveHarness) desfechoDe(sum agent.ReceiveSummary, name string) agent.ReceiveOutcome {
+	h.t.Helper()
+	for _, o := range sum.Outcomes {
+		if o.FileName == name {
+			return o
+		}
+	}
+	h.t.Fatalf("nenhum desfecho para %q no ciclo", name)
+	return agent.ReceiveOutcome{}
+}
+
 func (h *receiveHarness) envelopeEm(key string) envelope.Envelope {
 	h.t.Helper()
 	raw, err := h.store.Get(context.Background(), key)
@@ -259,8 +272,14 @@ func TestCA5_CorrelacaoIgnoraLinhasDeTransmissao(t *testing.T) {
 // CA3 — sem correlação, deposita ASSIM MESMO, declarando a ausência
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestCA5_ArquivoSemLinhaNoLogEhDepositadoDeclarandoAusenciaDeCorrelacao(t *testing.T) {
+// O log DESTE ciclo foi lido e não trazia a linha do arquivo. É o caso genuinamente suspeito, e o
+// único em que a ausência de correlação diz algo sobre o ARQUIVO.
+//
+// Para o log existir com linhas desta execução, outro arquivo chega correlacionado no mesmo ciclo —
+// que é como a instalação real se comporta: o log é do ciclo, não do arquivo.
+func TestCA5_LogLidoSemALinhaDoArquivoDeclaraAusenciaDeCorrelacao(t *testing.T) {
 	h := newReceiveHarness(t)
+	h.entrega("PAG_000000.20260818110000_0002.RET", "outro retorno, este correlacionado", true)
 	h.entrega(returnName, returnContent, false) // entregue SEM deixar linha no log
 
 	sum := h.run()
@@ -268,14 +287,20 @@ func TestCA5_ArquivoSemLinhaNoLogEhDepositadoDeclarandoAusenciaDeCorrelacao(t *t
 	if errs := sum.Errs(); len(errs) > 0 {
 		t.Fatalf("o ciclo acumulou erros: %v", errs)
 	}
+	if !sum.LogDoCicloLido {
+		t.Fatal("o log deste ciclo tem linhas e foi lido; o resumo precisa afirmá-lo")
+	}
 	// Erra-se para MAIS: descartar em silêncio um arquivo do banco é o desfecho que ninguém percebe.
 	if _, err := h.store.Get(context.Background(), h.prefixes.Returns+returnName); err != nil {
 		t.Fatalf("o arquivo sem correlação precisava ser depositado assim mesmo: %v", err)
 	}
 
-	env := h.envelopeEm(sum.Outcomes[0].StatusKey)
+	env := h.envelopeEm(h.desfechoDe(sum, returnName).StatusKey)
 	if env.Recepcao == nil || env.Recepcao.Correlacionado {
 		t.Error("o envelope precisa declarar que a origem não foi correlacionada")
+	}
+	if !env.Recepcao.LogDoCicloLido {
+		t.Error("o log foi lido; sem isso o consumidor não distingue \"não sei\" de \"sei que não tinha\"")
 	}
 	if !strings.Contains(env.Detalhe, "SEM linha correspondente") {
 		t.Errorf("o detalhe precisa dizer que não houve correlação; veio: %q", env.Detalhe)
@@ -283,6 +308,101 @@ func TestCA5_ArquivoSemLinhaNoLogEhDepositadoDeclarandoAusenciaDeCorrelacao(t *t
 	// E o hash continua lá: é ele que permite ao consumidor decidir sem reabrir o objeto.
 	if env.Recepcao.Sha256 != sha256Of(returnContent) {
 		t.Errorf("sha256 = %q, esperava %q", env.Recepcao.Sha256, sha256Of(returnContent))
+	}
+}
+
+// Sem log nenhum, a não-correlação não é sinal sobre o arquivo — é sobre a instalação.
+//
+// Este é o caso que, tratado como o de cima, faria o consumidor represar pagamento confirmado por
+// causa de um padrão de log mal configurado. O envelope precisa dizer que o agente NÃO SABE.
+func TestCA5_SemLogDoCicloAAusenciaDeCorrelacaoNaoAfirmaNadaSobreOArquivo(t *testing.T) {
+	h := newReceiveHarness(t)
+	h.entrega(returnName, returnContent, false) // nada é escrito no log
+
+	sum := h.run()
+
+	if errs := sum.Errs(); len(errs) > 0 {
+		t.Fatalf("o ciclo acumulou erros: %v", errs)
+	}
+	if sum.LogDoCicloLido {
+		t.Fatal("não havia log deste ciclo; afirmar que foi lido é o erro que o campo existe para impedir")
+	}
+	// O arquivo entra do mesmo jeito: a dúvida é sobre a evidência, não sobre o conteúdo.
+	if _, err := h.store.Get(context.Background(), h.prefixes.Returns+returnName); err != nil {
+		t.Fatalf("o arquivo precisava ser depositado assim mesmo: %v", err)
+	}
+
+	env := h.envelopeEm(sum.Outcomes[0].StatusKey)
+	if env.Recepcao == nil || env.Recepcao.Correlacionado {
+		t.Error("sem log não há como correlacionar")
+	}
+	if env.Recepcao.LogDoCicloLido {
+		t.Error("o envelope está afirmando ter lido um log que não existe")
+	}
+	if !strings.Contains(env.Detalhe, "configuração do log") {
+		t.Errorf("o detalhe precisa apontar a INSTALAÇÃO, não o arquivo; veio: %q", env.Detalhe)
+	}
+}
+
+// O modo de falha diário: o padrão casa o log de ONTEM, a leitura dá certo, e nenhuma linha é desta
+// execução.
+//
+// Sem a âncora temporal, o agente leria um log real, concluiria "li o log e não havia a linha" e
+// publicaria não-correlação com aparência de certeza — para TODOS os retornos do primeiro ciclo do
+// dia, todo dia. É o caso que justifica o campo existir.
+func TestCA5_LogDeOutroCicloNaoContaComoLogDesteCiclo(t *testing.T) {
+	h := newReceiveHarness(t)
+
+	// Um ciclo ontem deixou o log dele preenchido...
+	h.now = h.now.AddDate(0, 0, -1)
+	h.avancaRelogio()
+	h.entrega("PAG_000000.20260817110000_0001.RET", "retorno de ontem", true)
+	h.run()
+
+	// ...e hoje o cliente ainda não escreveu log novo, mas o padrão casa o de ontem.
+	h.now = h.now.AddDate(0, 0, 1)
+	h.avancaRelogio()
+	h.entrega(returnName, returnContent, false)
+
+	sum := h.run()
+
+	if sum.LogDoCicloLido {
+		t.Fatal("o log casado é de outro ciclo; tratá-lo como deste é o furo diário que a janela fecha")
+	}
+	env := h.envelopeEm(sum.Outcomes[0].StatusKey)
+	if env.Recepcao.LogDoCicloLido {
+		t.Error("o envelope afirma ter lido o log desta execução, e leu o de ontem")
+	}
+	if !strings.Contains(env.Detalhe, "configuração do log") {
+		t.Errorf("o detalhe precisa apontar a instalação; veio: %q", env.Detalhe)
+	}
+}
+
+// Linha de recepção de um ciclo ANTERIOR, com o mesmo nome, não pode correlacionar o arquivo de
+// agora.
+//
+// Bug que existia antes do campo novo: a correlação filtrava por nome e operação, nunca por tempo.
+// O cenário é real — o banco reenvia o mesmo nome com conteúdo corrigido; o hash acerta que é
+// arquivo novo, mas a linha velha do log do dia dava uma correlação que ninguém observou acontecer.
+func TestCA5_LinhaDeRecepcaoAntigaComMesmoNomeNaoCorrelaciona(t *testing.T) {
+	h := newReceiveHarness(t)
+
+	// Ciclo 1: o arquivo chega e é registrado no log.
+	h.entrega(returnName, returnContent, true)
+	h.run()
+
+	// Ciclo 2, mais tarde: o MESMO nome volta com conteúdo diferente, e desta vez sem linha nova.
+	h.now = h.now.Add(2 * time.Hour)
+	h.avancaRelogio()
+	h.entrega(returnName, "conteúdo corrigido pelo banco, mesmo nome", false)
+
+	sum := h.run()
+
+	if len(sum.Outcomes) != 1 {
+		t.Fatalf("esperava 1 desfecho, veio %d", len(sum.Outcomes))
+	}
+	if sum.Outcomes[0].Correlated {
+		t.Error("a linha correlacionada é do ciclo anterior; ela não prova a origem do arquivo de agora")
 	}
 }
 
