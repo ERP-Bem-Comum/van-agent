@@ -100,6 +100,22 @@ go build ./cmd/van-agent           # o binário
 GOOS=windows GOARCH=amd64 go build -o van-agent.exe ./cmd/van-agent   # compilação cruzada
 ```
 
+### Verificação contínua
+
+`.github/workflows/ci.yml` roda em todo push para `main` e em todo pull request, em dois jobs:
+
+| Job          | O que cobre                                                                                          |
+| :----------- | :---------------------------------------------------------------------------------------------------- |
+| `verificar`  | `go test ./...` · `go vet ./...` · `gofmt -l .` vazio · compilação cruzada para **windows/amd64** · o golden versionado bate com o que o código produz |
+| `integracao` | a mesma suíte com um **MinIO efêmero** de service, para que o adapter de object storage seja exercitado de verdade e não apenas pulado |
+
+**O que o CI deliberadamente NÃO cobre: execução na máquina Windows real.** O binário de produção é windows/amd64, e aqui ele apenas **compila** para esse alvo — toda a suíte roda em Linux. Nada substitui rodar lá, e este agente não tem staging: o que existe é a máquina de produção.
+
+Duas escolhas do arquivo que não são detalhe:
+
+- **Actions de terceiros fixadas por SHA, nunca por tag.** Uma tag é um ponteiro que o dono do repositório pode mover, e mover a tag de uma action que roda no nosso CI é execução de código arbitrário no pipeline de um componente que transmite pagamento. Ao atualizar, trocar o SHA e o comentário da versão juntos.
+- **Nenhuma credencial, endpoint ou nome de bucket real no arquivo.** As chaves do job de integração pertencem a um MinIO criado e destruído pelo próprio job; o bucket é criado pelo teste, com nome derivado do relógio.
+
 ### Teste de integração do armazenamento
 
 Os testes que falam com um object storage de verdade são **pulados** quando não há endpoint configurado — a suíte precisa continuar rodável numa máquina sem nuvem e sem rede. Para exercitá-los, aponte para qualquer S3-compatível:
