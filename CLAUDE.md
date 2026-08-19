@@ -51,18 +51,25 @@ a suíte continua rodável sem nuvem e sem rede.
 o que cada inversão abre:
 
 ```
+0. republicar pendências  (ReconcilePending) ← desfechos que não chegaram ao bucket antes
 1. gravar a intenção      (ledger, fsync)  ← durável, ANTES de tocar a pasta de SAÍDA
 2. depositar na SAÍDA     (spool.Place)    ← a partir daqui o cliente pode enviar a qualquer momento
 3. acionar o cliente      (stcp.Run)
 4. ler a evidência física (sumiu da SAÍDA + apareceu em BACKUP?)
 5. registrar o desfecho   (ledger done)
-6. publicar o status      (bucket status/)
+6. publicar o status      (bucket status/) ← pendência gravada ANTES, limpa após confirmar
 7. mover o objeto         (processados/ ou falhas/)
 ```
 
 Inverter 1 e 2 é o bug que este componente existe para impedir: uma queda entre depositar e
 registrar deixaria um arquivo na fila do banco sem o agente saber, e o próximo ciclo depositaria de
 novo. Inverter 5 e 6 publicaria um desfecho que o registro não conhece, e o arquivo voltaria à fila.
+
+O passo 6 é o único que pode falhar **depois** de o mundo já ter mudado, e o passo 7 roda mesmo
+assim — daí a pendência do passo 0. Sem ela, uma falha ao publicar deixava objeto no bucket sem
+desfecho, para sempre: o registro já dizia `done` e nada voltava a passar por ali. Vale nos dois
+ciclos (`internal/agent/publish.go`), e o corpo republicado é o **original, byte a byte** — o
+desfecho não mudou, só a publicação falhou.
 
 Invariantes que decorrem disso:
 
@@ -109,7 +116,7 @@ pelo consumidor.
 | :-- | :-- |
 | `internal/agent` | o ciclo, a ordem, os critérios de aceite (`FileFilter` monta o `-f`) |
 | `internal/bucket` | interface `Store` + `Memory` (duplo, vive em código de produção porque o ensaio o usa) + `S3` (adapter real) |
-| `internal/ledger` | intenção em disco local — `O_EXCL` + `Sync` na intenção, tmp+rename na conclusão; nome vira sha256 no caminho |
+| `internal/ledger` | intenção em disco local — `O_EXCL` + `Sync` na intenção, tmp+rename na conclusão; nome vira sha256 no caminho. Também o índice de recepção (por hash de conteúdo) e os envelopes pendentes (por chave), cada um em **diretório próprio** |
 | `internal/envelope` | contrato do `status/`, chaves e `ValidName` (guarda de fronteira contra `/`, `..` e marcadores) |
 | `internal/spool` | pastas SAÍDA/BACKUP/LOG — a evidência física; `Place` escreve fora e renomeia para dentro |
 | `internal/stcp` | linha de comando (§6, p.14) e parser do log posicional de 10 campos (§12, p.30) |
