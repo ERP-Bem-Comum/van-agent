@@ -7,9 +7,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/ERP-Bem-Comum/van-agent/internal/envelope"
+	"github.com/ERP-Bem-Comum/van-agent/internal/stcp"
 )
 
 // spoolQueNaoConsegueLer encena a instalação em que a evidência física está ilegível — permissão
@@ -33,6 +35,18 @@ func erroDeCaminhoLongo() error {
 	return errors.New("consultar \"" + caminho + "\": " +
 		"O processo não pode acessar o arquivo porque ele está sendo usado por outro processo.")
 }
+
+// ⚠️ TRAVA DE COMPILAÇÃO — `verdict` não pode enxergar o log.
+//
+// O veredito vem da evidência física (ADR-0061 §2); o log é diagnóstico. A garantia disso não é uma
+// asserção de teste, é a ASSINATURA: `verdict` recebe o nome, o código de saída e o erro de
+// execução, e mais nada. Se alguém lhe passar as linhas do log ou o `stcp.SendOutcome` — para
+// "melhorar" o desfecho —, este arquivo deixa de compilar, e o defeito aparece na hora em vez de
+// aparecer num "sucesso" no log com o arquivo parado na fila do banco.
+//
+// Um teste comum não pegaria isso: ele afirmaria o comportamento de hoje, e o comportamento novo
+// seria escrito junto com o teste novo. A assinatura é o que não se altera sem intenção.
+var _ func(*Agent, string, *int, error) (envelope.Situation, string) = (*Agent).verdict
 
 func TestCA3_TextoFixoDoDetalheSobreviveAoCorteDoErro(t *testing.T) {
 	a := &Agent{sp: spoolQueNaoConsegueLer{err: erroDeCaminhoLongo()}}
@@ -65,6 +79,61 @@ func TestCA3_TextoFixoDoDetalheSobreviveAoCorteDoErro(t *testing.T) {
 	// A cauda de cada erro foi cortada, e o corte está marcado nos DOIS.
 	if c := strings.Count(detalhe, marcaDeCorte); c != 2 {
 		t.Errorf("esperava marca de corte nos dois erros interpolados; encontrei %d em:\n%s", c, detalhe)
+	}
+}
+
+// A pergunta do core-api, virada em teste: quando o `detalhe` é truncado, o código do §11 sobrevive
+// ou é a primeira coisa a cair?
+//
+// A suspeita dele tinha fundamento estrutural: o corte do contrato preserva o COMEÇO, e o código
+// entra no FIM. Se o desfecho for o do caminho mais longo — evidência física ilegível, que interpola
+// dois erros —, o campo que a (c) existe para entregar seria justamente o que o teto remove. E do
+// lado dele, `detalhe` truncado SEM código é indistinguível de "não houve código".
+func TestCodigoDoBancoSobreviveAoTetoDoContrato(t *testing.T) {
+	// Antes da reserva, isto degradava com o COMPRIMENTO DO NOME, e sem nenhum aviso: com 34
+	// caracteres (o nome que a própria suíte usa) a referência ao §11 já saía mutilada; com 40 ela
+	// sumia; com 60 sumia o código. Por isso o teste varre faixas em vez de fixar um nome — um caso
+	// só teria passado por acidente de ordem das palavras e declarado a garantia como existente.
+	//
+	// O nome NÃO é nosso: ele vem do core-api byte a byte, e a trava de comprimento
+	// (`VAN_AGENT_NAME_MAX_LENGTH`) é opt-in por ambiente. Supor que ele é curto é supor
+	// configuração alheia.
+	a := &Agent{sp: spoolQueNaoConsegueLer{err: erroDeCaminhoLongo()}}
+
+	for _, n := range []int{20, 34, 40, 60, 80, 120} {
+		nome := strings.Repeat("N", n-4) + ".REM"
+
+		_, detalhe := a.verdict(nome, nil, nil)
+		detalhe = comCodigoDoBanco(detalhe, stcp.SendOutcome{Finished: true, FailureCode: "000401"})
+
+		// Passa pelo piso do contrato: é o que o consumidor recebe de fato.
+		env := envelope.New(nome, time.Unix(0, 0), envelope.Review, detalhe, nil, nil)
+
+		if n := utf8.RuneCountInString(env.Detalhe); n > envelope.MaxDetailLength {
+			t.Errorf("nome de %d: detalhe entregue com %d caracteres", len(nome), n)
+		}
+		// 1º — o código, que é o que esta função existe para entregar. Do lado do consumidor, a
+		// ausência dele é indistinguível de "não houve código", que é a conclusão oposta.
+		if !strings.Contains(env.Detalhe, "000401") {
+			t.Errorf("nome de %d caracteres: o código do banco NÃO sobreviveu ao teto.\n%s",
+				len(nome), env.Detalhe)
+		}
+		// 2º — a referência que diz onde procurar o significado do código.
+		if !strings.Contains(env.Detalhe, "§11, pp. 24-29)") {
+			t.Errorf("nome de %d caracteres: a referência ao §11 saiu mutilada — um código sem a\n"+
+				"tabela obriga quem lê a adivinhar onde procurar.\n%s", len(nome), env.Detalhe)
+		}
+		// 3º — a instrução ao operador, que o código não pode ter comido para sobreviver.
+		if !strings.Contains(env.Detalhe, "não foi possível conferir a evidência física") {
+			t.Errorf("nome de %d caracteres: o corte comeu a instrução ao operador.\n%s",
+				len(nome), env.Detalhe)
+		}
+		// E o corte, quando acontece, continua declarado.
+		if utf8.RuneCountInString(detalhe) > envelope.MaxDetailLength &&
+			!strings.Contains(env.Detalhe, marcaDeCorte) {
+			t.Errorf("nome de %d caracteres: houve corte e ele não foi marcado.\n%s",
+				len(nome), env.Detalhe)
+		}
 	}
 }
 

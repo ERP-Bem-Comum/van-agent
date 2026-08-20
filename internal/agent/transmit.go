@@ -286,7 +286,14 @@ func (a *Agent) handleInterrupted(ctx context.Context, out Outcome) Outcome {
 	detail := "execução anterior foi interrompida após gravar a intenção e antes de registrar o desfecho; " +
 		"o arquivo pode ter sido transmitido e NÃO é retransmitido automaticamente — exige conferência humana"
 
-	logLines := a.transferLogFor(out.FileName)
+	// O código do banco entra aqui também, e é onde ele mais vale: a intenção ficou gravada e
+	// ninguém sabe o que aconteceu. Se o cliente chegou a registrar uma linha de fim de transmissão
+	// para este nome, o que ela diz é a primeira informação que a conferência humana precisa — e
+	// vale sem janela de tempo pela razão de sempre: um nome já concluído nunca é retransmitido,
+	// então a linha daquele nome é da tentativa que morreu, não de outra.
+	logLines, envio := a.transferLogFor(out.FileName)
+	detail = comCodigoDoBanco(detail, envio)
+
 	env := envelope.New(out.FileName, now, envelope.Review, detail, nil, logLines)
 
 	out.Situation = envelope.Review
@@ -343,7 +350,12 @@ func (a *Agent) transmit(ctx context.Context, out Outcome, key string) Outcome {
 	// PASSO 4 — a evidência física decide.
 	situation, detail := a.verdict(out.FileName, exitCode, runErr)
 
-	logLines := a.transferLogFor(out.FileName)
+	// O log entra DEPOIS do veredito, e só no diagnóstico: o que o banco registrou explica o
+	// desfecho, nunca o define. Inverter isto faria um "sucesso" no log com o arquivo parado na
+	// fila virar `transmitido` — exatamente o erro que a evidência física existe para impedir.
+	logLines, envio := a.transferLogFor(out.FileName)
+	detail = comCodigoDoBanco(detail, envio)
+
 	env := envelope.New(out.FileName, a.cfg.Clock(), situation, detail, exitCode, logLines)
 
 	// PASSO 5 — registrar antes de publicar. Uma queda entre os dois deixa o registro concluído e o
@@ -413,22 +425,85 @@ func (a *Agent) verdict(fileName string, exitCode *int, runErr error) (envelope.
 	}
 }
 
-// transferLogFor lê e filtra o log daquele arquivo.
+// transferLogFor lê e filtra o log daquele arquivo, e resume o que ele diz sobre a transmissão.
 //
 // As linhas vão CRUAS para o envelope. A decodificação existe para escolher quais linhas importam,
 // nunca para substituí-las: se um offset estiver errado, quem investiga ainda tem o texto original.
+//
+// O resumo sai da MESMA leitura, e não de uma segunda: o cliente escreve nesse arquivo enquanto o
+// ciclo roda, e duas leituras poderiam ver estados diferentes — o envelope carregaria linhas cruas
+// de um momento e um código de outro, divergência que ninguém teria como perceber depois.
 //
 // ⚠️ Aqui NÃO há filtro por janela de tempo, ao contrário da recepção, e a assimetria é deliberada.
 // Na transmissão o nome é escolhido por nós e é a chave de idempotência: um nome já concluído nunca
 // é retransmitido, então não existe a linha antiga homônima que a recepção precisa rejeitar. Além
 // disso o veredito da transmissão vem da EVIDÊNCIA FÍSICA (ADR-0061 §2), e estas linhas alimentam
 // só o diagnóstico — apertá-las aqui removeria contexto útil sem corrigir desfecho nenhum.
-func (a *Agent) transferLogFor(fileName string) []string {
+func (a *Agent) transferLogFor(fileName string) ([]string, stcp.SendOutcome) {
 	raw, _, err := a.sp.ReadTransferLog()
 	if err != nil || raw == "" {
-		return nil
+		return nil, stcp.SendOutcome{}
 	}
-	return stcp.RawLines(stcp.FilterByFile(stcp.ParseLog(raw), fileName))
+	records := stcp.ParseLog(raw)
+	return stcp.RawLines(stcp.FilterByFile(records, fileName)), stcp.SendOutcomeFor(records, fileName)
+}
+
+// comCodigoDoBanco acrescenta ao `detalhe` o código que o CLIENTE DO BANCO registrou no log.
+//
+// ⚠️ Isto é DIAGNÓSTICO, e nunca veredito. A situação já foi decidida pela evidência física antes de
+// esta função ser chamada, e ela não recebe nem devolve situação de propósito: o manual documenta o
+// resultado no log (§12, p.30), mas quem decide aqui é o arquivo ter sumido da SAÍDA e aparecido em
+// BACKUP (ADR-0061 §2). Deixar um código de log virar veredito reabriria o caminho que o componente
+// existe para fechar — um "sucesso" no log com o arquivo parado na fila viraria `transmitido`.
+//
+// Por que o campo `detalhe` e não um campo próprio: o código JÁ chegava ao consumidor, embutido na
+// linha crua de `logTransferencia` — legível por humano que saiba o layout posicional, e por mais
+// ninguém. O core-api mediu e confirmou que **não lê `logTransferencia` por máquina**; o `detalhe` é
+// o campo que ele persiste e devolve na borda. Campo próprio mudaria o contrato e ficou registrado
+// como condicional: só no dia em que contagem de falhas por código virar número que alguém lê.
+//
+// Sem código, a frase não muda. E a ausência NÃO é prova de que não houve falha: pode não ter havido
+// linha de fim de transmissão, ou o log pode não ter sido lido — o padrão do nome é configuração e
+// segue sendo palpite até alguém medir a instalação. Por isso o texto afirma só o que sabe: que o
+// cliente registrou aquele código.
+//
+// ⚠️ O acréscimo RESERVA o próprio espaço, e essa é a parte que não é óbvia.
+//
+// O piso do contrato (`envelope.MaxDetailLength`) corta pelo FIM, e o código entra no fim. Sem
+// reserva, o campo que esta função existe para entregar é o PRIMEIRO a cair — e cai justamente no
+// caminho mais longo, o do desfecho ambíguo, que interpola dois erros do sistema operacional.
+//
+// Medido antes de existir a reserva, no caminho ambíguo: com nome de 34 caracteres (o que a própria
+// suíte usa) o detalhe já saía em 518 e o piso mutilava a referência ao §11; a partir de 40 a
+// referência sumia; a partir de 60 o CÓDIGO sumia. Ele sobrevivia por acidente de ordem das
+// palavras — o número aparece cedo na frase acrescentada —, não por garantia.
+//
+// A prioridade que a reserva impõe é deliberada: **instrução ao operador > código do banco > cauda
+// do erro do SO**. O código é diagnóstico de decisão (manda olhar a tabela do §11); a cauda de um
+// erro do SO é caminho e mensagem localizada. Do lado do consumidor, `detalhe` truncado SEM código é
+// indistinguível de "não houve código" — que é a conclusão oposta.
+func comCodigoDoBanco(detail string, envio stcp.SendOutcome) string {
+	if envio.FailureCode == "" {
+		return detail
+	}
+	// O código tem 6 posições no §12 (campo 7), então o acréscimo é curto e limitado por
+	// construção — não passa pelo orçamento de `resumirErro`, que existe para erro do SO.
+	sufixo := fmt.Sprintf("; o cliente registrou o código %s no log (tabela do §11, pp. 24-29)",
+		envio.FailureCode)
+
+	sobra := envelope.MaxDetailLength - utf8.RuneCountInString(sufixo)
+	if utf8.RuneCountInString(detail) <= sobra {
+		return detail + sufixo
+	}
+	// Não cabe: corta o DETALHE — nunca o sufixo — e marca. A marca fica ANTES do código, então
+	// quem lê vê nesta ordem: instrução, corte declarado, código. Nenhuma das três é adivinhada.
+	corte := sobra - utf8.RuneCountInString(marcaDeCorte)
+	if corte <= 0 {
+		// Inalcançável com o texto atual (o sufixo tem ~71 caracteres contra um teto de 512), mas
+		// fatiar com índice negativo entraria em pânico dentro de um ciclo que já mexeu no mundo.
+		return detail + sufixo
+	}
+	return string([]rune(detail)[:corte]) + marcaDeCorte + sufixo
 }
 
 // publishAndSegregate cobre os desfechos em que o ciclo recusa o arquivo ANTES de qualquer
