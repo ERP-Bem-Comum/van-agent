@@ -60,6 +60,10 @@ Inverter 1 e 2 abriria a janela que este componente existe para fechar: uma qued
 
 O corpo republicado é o **original, byte a byte**. O desfecho não mudou — o que falhou foi a publicação. Reconstruí-lo afirmaria outra coisa, e nem seria possível: o log daquele ciclo e o relógio daquele momento não existem mais. Por isso o registro guarda os bytes, e não os dados para remontá-los.
 
+**A retomada não desiste**: não há contador de tentativas, TTL nem fila morta. Uma pendência que continua falhando permanece registrada e reaparece na passada seguinte, a cada cinco minutos, indefinidamente — desistir em silêncio recriaria o órfão com um passo a mais.
+
+Sobra **um** caminho em que nem isso salva, e ele é declarado em vez de escondido: se o registro da pendência **e** a publicação falharem na mesma passagem (disco local e bucket juntos), o desfecho não sai e não fica registrado. O código tenta registrar uma segunda vez — a primeira falha costuma ser transitória — e, se ainda assim não conseguir, **acusa `agent.ErrOrphanEnvelope`**: o binário separa essa linha das demais na saída de erro, porque as duas categorias pedem ações opostas. Uma falha comum de publicação significa "o próximo ciclo resolve"; um órfão significa "vá olhar o bucket agora". Saírem pela mesma porta é o que faz alguém tratar a segunda como a primeira.
+
 O registro de intenção (`internal/ledger`) responde as três perguntas do ciclo:
 
 | Leitura  | Significado                     | Ação                                   |
