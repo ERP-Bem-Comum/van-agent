@@ -106,6 +106,13 @@ Três coisas que quebram o consumidor em silêncio:
 3. As tags JSON são **PT-BR** (`arquivo`, `executadoEm`, `situacao`, `detalhe`, `exitCode`,
    `logTransferencia`) e a chave do duplicado é distinta da normal de propósito — o consumidor
    classifica pela chave. Renomear qualquer um quebra o outro lado.
+4. `detalhe` tem teto de **512 caracteres** (`envelope.MaxDetailLength`), garantido em `envelope.New`
+   — caracteres, não bytes, porque é assim que o `varchar` do consumidor conta. Sem o teto, um
+   detalhe longo derruba o `INSERT` de lá (erro, não truncamento), a confirmação falha, e a varredura
+   do core-api **aborta na chave ruim em vez de pulá-la**: toda remessa que ordene depois deixa de ser
+   confirmada, para sempre. Quem escolhe **onde** cortar é `agent.resumirErro`, que preserva a
+   instrução ao operador e come a cauda do erro do SO — e marca o corte, porque diagnóstico cortado em
+   silêncio parece completo.
 
 `Situation` é fechada (`transmitido`/`falha`/`revisao`/`recepcao`); valor fora da lista é recusado
 pelo consumidor.
