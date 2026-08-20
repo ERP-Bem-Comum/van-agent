@@ -38,10 +38,17 @@ transmitido** (§5, p.13). Nunca rodar ensaio em instalação de produção com 
 
 ## Estado
 
-Medido em 20/08/2026: **tudo o que se resolvia escrevendo Go está entregue.** CI verde, nenhum PR
-aberto, nenhuma issue aberta além do épico #6. Transmissão (CA1–CA4, CA7) e **recepção (CA5/CA6)**
-rodam contra o bucket real — `internal/bucket/s3.go` implementa `bucket.Store` sobre o SDK oficial
-da AWS, e os três modos vivem em `cmd/van-agent`. CA8 (credencial por role) está atendido do lado do
+**Tudo o que se resolvia escrevendo Go está entregue.**
+
+> Contagem de issues e PRs abertos **não mora aqui**, e a razão é experiência recente: esta seção já
+> afirmou "nenhum PR aberto" e a frase ficou falsa no instante do merge, porque outro PR estava
+> aberto naquele minuto. Estado que muda por hora não cabe em arquivo versionado — pergunte ao
+> `gh issue list` / `gh pr list`, e leia o **épico #6** para o que está em aberto de verdade. O que
+> fica escrito aqui é o que continua valendo depois de amanhã.
+
+Transmissão (CA1–CA4, CA7) e **recepção (CA5/CA6)** rodam contra o bucket real —
+`internal/bucket/s3.go` implementa `bucket.Store` sobre o SDK oficial da AWS, e os três modos vivem
+em `cmd/van-agent`. CA8 (credencial por role) está atendido do lado do
 código: sem chave informada, a resolução cai na cadeia de provedores.
 
 O consumidor do outro lado **também** está pronto — a #753 do core-api varre `retorno/`, tria pela
