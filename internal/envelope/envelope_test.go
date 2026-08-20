@@ -544,6 +544,33 @@ func TestCA6_DetalheQueCabeNaoEhTocado(t *testing.T) {
 	}
 }
 
+// A marca de corte do PRODUTOR é distinta da do consumidor, e isso deixou de ser coincidência.
+//
+// Os dois lados cortam no MESMO teto. Se este lado cortar corretamente, o que chega ao core-api tem
+// no máximo `MaxDetailLength` e ele nunca precisa cortar. Logo: **a marca DELE aparecer num
+// `detalhe` é, por construção, sinal de que o produtor está fora do contrato** — não é redundância
+// defensiva, é um detector. O caso realista é agente de versão antiga numa máquina não atualizada.
+//
+// Igualar as duas marcas destruiria o detector em silêncio: os envelopes continuariam válidos, o
+// consumidor continuaria aceitando, e o sinal de "produtor desatualizado" deixaria de existir sem
+// que nada falhasse. Por isso a marca está fixada em teste, e não só combinada por carta.
+func TestMarcaDeCorteEhDistintaDaDoConsumidor(t *testing.T) {
+	// A marca do consumidor, conforme `status-envelope.ts` do core-api. Está escrita aqui como
+	// literal de propósito: é a única forma de este teste falhar se alguém adotar a marca dele.
+	const marcaDoConsumidor = "… [truncado]"
+
+	env := envelope.New("PAG_000000.REM", time.Now(), envelope.Review, detalheGigante(), nil, nil)
+
+	if !strings.HasSuffix(env.Detalhe, " […]") {
+		t.Errorf("a marca do produtor mudou; o combinado com o core-api é ` […]`. Veio: %q",
+			ultimasRunas(env.Detalhe, 16))
+	}
+	if strings.Contains(env.Detalhe, marcaDoConsumidor) {
+		t.Errorf("o produtor passou a usar a marca do CONSUMIDOR — o detector de "+
+			"\"produtor fora do contrato\" morre em silêncio. Veio: %q", ultimasRunas(env.Detalhe, 16))
+	}
+}
+
 func ultimasRunas(s string, n int) string {
 	runas := []rune(s)
 	if len(runas) <= n {
