@@ -112,6 +112,16 @@ As duas metades, e não uma: só o produtor truncando, outro produtor futuro vol
 
 Onde cada garantia mora: o **piso** é `envelope.New`, por onde todo envelope passa — deixá-lo em cada chamador significaria que um chamador novo reabre o defeito sem que nada acuse. A **escolha de onde cortar** é do `agent` (`resumirErro`), que sabe qual parte da frase é instrução e qual é cauda de erro do SO. O corte é por runa, nunca por byte: fatiar bytes partiria um caractere acentuado ao meio e produziria JSON inválido — o texto é PT-BR, isso é o caso comum. E **nunca é silencioso**: diagnóstico cortado sem aviso é pior que ausente, porque parece completo.
 
+### ⚠️ O contrato não é só o envelope: o core-api LÊ os prefixos por nome de arquivo
+
+Registrado em 20/08/2026, comunicado por carta pelo core-api. Uma rota de download de remessa (`GET /financial/remittances/:id/file`, para conferência em homologação) passou a **ler** os prefixos deste ciclo: procura o objeto em `saida/`, depois `processados/`, depois `falhas/` — a ordem do ciclo de vida — e para no primeiro que existir. Ela serve o objeto do bucket, **nunca uma regeração**: regerar produziria outro NSA e outro carimbo, e arquivo parecido não é evidência. `sandbox/` fica de fora de propósito, porque um exercício tem o mesmo nome de um envio real.
+
+**Ele só lê.** Não escreve, não move, não apaga — quem move objeto entre prefixos continua sendo este agente, e a interface do storage continua sem operação de remoção.
+
+**O que isto acrescenta à nossa lista de riscos:** a chave do objeto virou dado com prazo de validade, **e o prazo é nosso**. Se este ciclo um dia passar a mover para um prefixo novo, ou a renomear o objeto ao mover, **aquela rota para de achar o arquivo em silêncio** — ela devolve "não encontrado", que é indistinguível de "arquivo antigo, já expurgado". Ninguém vê erro; alguém vê um download vazio e conclui a coisa errada.
+
+Não há mudança a fazer aqui hoje. O que há é uma obrigação nova: **mudar prefixo ou renomear ao mover deixou de ser decisão interna deste repositório.** Avisar o core-api antes é o que impede a rota de passar a mentir.
+
 ---
 
 ## Rodar
