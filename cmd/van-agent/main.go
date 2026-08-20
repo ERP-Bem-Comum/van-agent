@@ -4,7 +4,8 @@
 // o fabricante documenta (§10, pp. 20-23) — não há laço interno, não há serviço. A consequência
 // prática é que o código de saída é a interface com o agendador, e por isso ele é explícito.
 //
-// Dois modos, e a diferença entre eles é UMA linha: qual armazenamento o ciclo recebe.
+// Três modos. Entre `ensaio` e `transmissao` a diferença é UMA linha — qual armazenamento o ciclo
+// recebe; `recepcao` é o outro ciclo.
 //
 //   - `ensaio` roda o ciclo inteiro contra um armazenamento em memória. Serve para verificar uma
 //     instalação nova — configuração, pastas, executável, filtro, registro — sem que nada precise
@@ -14,8 +15,8 @@
 //     ninguém se der errado, e por isso é por ele que se começa a exercitar qualquer instalação
 //     real.
 //
-// Que os dois compartilhem o MESMO ciclo é deliberado: um ensaio que exercitasse um caminho
-// diferente do de produção verificaria o ensaio, não a instalação.
+// Que `ensaio` e `transmissao` compartilhem o MESMO ciclo é deliberado: um ensaio que exercitasse um
+// caminho diferente do de produção verificaria o ensaio, não a instalação.
 package main
 
 import (
@@ -53,7 +54,11 @@ const (
 type storeBuilder func(ctx context.Context) (bucket.Store, string, error)
 
 func main() {
-	mode := flag.String("modo", "", "ensaio | transmissao")
+	// A lista aqui é a que o `-h` imprime, e por isso ela precisa ser a MESMA do `switch` abaixo e do
+	// texto de uso: um modo que existe e não aparece no `-h` é um modo que ninguém descobre. Foi o que
+	// aconteceu com `recepcao` — justamente o único ciclo que não move dinheiro, e por isso o primeiro
+	// a ser rodado numa instalação nova.
+	mode := flag.String("modo", "", "ensaio | transmissao | recepcao")
 	flag.Parse()
 
 	switch *mode {

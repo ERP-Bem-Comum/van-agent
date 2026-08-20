@@ -23,8 +23,10 @@ go test ./internal/envelope -update             # regrava o golden do contrato (
 go vet ./... && gofmt -l .                      # não há linter configurado; use estes
 go build ./cmd/van-agent
 GOOS=windows GOARCH=amd64 go build -o van-agent.exe ./cmd/van-agent
-van-agent -modo=ensaio                          # ciclo contra bucket em memória
-van-agent -modo=transmissao                     # ciclo contra o bucket real
+van-agent -modo=ensaio                          # ciclo de transmissão contra bucket em memória
+van-agent -modo=transmissao                     # ciclo de transmissão contra o bucket real
+van-agent -modo=recepcao                        # ciclo de recepção contra o bucket real
+go build -o stcp-encenado ./cmd/stcp-encenado   # cliente encenado, para simulação fora da suíte
 ```
 
 Os testes de integração do armazenamento são **pulados** quando `VAN_S3_ENDPOINT` não está definido.
@@ -36,10 +38,23 @@ transmitido** (§5, p.13). Nunca rodar ensaio em instalação de produção com 
 
 ## Estado
 
-Fatia 1 (núcleo) entregue: CA1, CA2, CA3, CA4, CA7. Fatia 2 (adapter de object storage) entregue:
-`internal/bucket/s3.go` implementa `bucket.Store` sobre o SDK oficial da AWS, e `-modo=transmissao`
-roda. CA8 (credencial por role) está atendido do lado do código — sem chave informada, a resolução
-cai na cadeia de provedores. Faltam **CA5/CA6** (ciclo de recepção).
+Medido em 20/08/2026: **tudo o que se resolvia escrevendo Go está entregue.** CI verde, nenhum PR
+aberto, nenhuma issue aberta além do épico #6. Transmissão (CA1–CA4, CA7) e **recepção (CA5/CA6)**
+rodam contra o bucket real — `internal/bucket/s3.go` implementa `bucket.Store` sobre o SDK oficial
+da AWS, e os três modos vivem em `cmd/van-agent`. CA8 (credencial por role) está atendido do lado do
+código: sem chave informada, a resolução cai na cadeia de provedores.
+
+O consumidor do outro lado **também** está pronto — a #753 do core-api varre `retorno/`, tria pela
+proveniência do envelope de recepção e mantém a quarentena. Conferido campo a campo em 20/08 (golden
+idêntico, `recepcao.*`, prefixos, e o hash sobre bytes crus nas duas pontas). **O que falta para o
+marco do épico #6 não é código, é infra**: bucket e MySQL no ambiente de apoio, para o ensaio de
+ponta a ponta. Ao pegar este repo, não procure o que implementar — procure o que ainda não foi
+*observado*.
+
+Duas pendências que nenhum Go resolve, e que só a instalação real fecha: o nome do arquivo do log
+posicional nunca foi medido (padrão que não casa ⇒ `logDoCicloLido: false` em todo retorno, sem que
+nada emita erro), e o teto de 26 caracteres do nome não foi confirmado com o banco (erro 1101,
+§11 p.26 — procedimento condicional, duas condições não verificadas).
 
 O `go.mod` tem as dependências do SDK (`aws-sdk-go-v2/{config,credentials,service/s3}` + `smithy-go`)
 e nada além. Elas entram **só** em `internal/bucket/s3.go`: o resto do agente continua stdlib pura, e
