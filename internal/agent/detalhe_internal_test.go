@@ -34,6 +34,18 @@ func erroDeCaminhoLongo() error {
 		"O processo não pode acessar o arquivo porque ele está sendo usado por outro processo.")
 }
 
+// ⚠️ TRAVA DE COMPILAÇÃO — `verdict` não pode enxergar o log.
+//
+// O veredito vem da evidência física (ADR-0061 §2); o log é diagnóstico. A garantia disso não é uma
+// asserção de teste, é a ASSINATURA: `verdict` recebe o nome, o código de saída e o erro de
+// execução, e mais nada. Se alguém lhe passar as linhas do log ou o `stcp.SendOutcome` — para
+// "melhorar" o desfecho —, este arquivo deixa de compilar, e o defeito aparece na hora em vez de
+// aparecer num "sucesso" no log com o arquivo parado na fila do banco.
+//
+// Um teste comum não pegaria isso: ele afirmaria o comportamento de hoje, e o comportamento novo
+// seria escrito junto com o teste novo. A assinatura é o que não se altera sem intenção.
+var _ func(*Agent, string, *int, error) (envelope.Situation, string) = (*Agent).verdict
+
 func TestCA3_TextoFixoDoDetalheSobreviveAoCorteDoErro(t *testing.T) {
 	a := &Agent{sp: spoolQueNaoConsegueLer{err: erroDeCaminhoLongo()}}
 

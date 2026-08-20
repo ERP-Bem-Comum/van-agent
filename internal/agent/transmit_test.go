@@ -251,6 +251,72 @@ func TestCA2_RecusaVaiParaFalhasComCodigoENaoRetenta(t *testing.T) {
 	}
 }
 
+// O código do banco passa a chegar ao campo `detalhe`, e não só embutido na linha crua.
+//
+// Antes disto, o código só existia no log posicional dentro de `logTransferencia` — legível por
+// quem souber os offsets do §12, e por mais ninguém. O core-api mediu e confirmou que NÃO lê
+// `logTransferencia` por máquina; `detalhe` é o campo que ele persiste e devolve na borda. Campo
+// próprio no envelope mudaria o contrato e ficou registrado como condicional.
+func TestCA2_CodigoDoBancoChegaAoDetalheENaoSoAoLogCru(t *testing.T) {
+	h := newHarness(t)
+	h.fake.Behavior = func(string) stcpfake.Behavior { return stcpfake.Reject }
+	h.fake.FailureCode = "000401" // §11, p.24 — nome inválido ou filtro de nomenclatura
+	h.queue(remittanceName, remittanceContent)
+
+	h.run()
+
+	env := h.statusFor(envelope.Key(remittanceName))
+	if !strings.Contains(env.Detalhe, "000401") {
+		t.Errorf("o código do banco precisa chegar ao detalhe; veio: %q", env.Detalhe)
+	}
+	if !strings.Contains(env.Detalhe, "§11") {
+		t.Errorf("o detalhe precisa dizer contra qual tabela o código vale; veio: %q", env.Detalhe)
+	}
+	// E o que o detalhe já dizia continua lá: o código ACRESCENTA, nunca substitui.
+	if !strings.Contains(env.Detalhe, "arquivo permanece na pasta de saída") {
+		t.Errorf("o código comeu o texto do desfecho; veio: %q", env.Detalhe)
+	}
+	// O veredito não muda: quem decide é a evidência física, não o log.
+	if env.Situacao != envelope.Failed {
+		t.Errorf("situação = %q, esperava %q — o código do banco é diagnóstico, não veredito",
+			env.Situacao, envelope.Failed)
+	}
+}
+
+func TestCA1_TransmissaoBemSucedidaNaoInventaCodigoDeFalha(t *testing.T) {
+	h := newHarness(t)
+	h.queue(remittanceName, remittanceContent)
+
+	h.run()
+
+	env := h.statusFor(envelope.Key(remittanceName))
+	if strings.Contains(env.Detalhe, "§11") {
+		t.Errorf("transmissão bem-sucedida não pode carregar código de falha; veio: %q", env.Detalhe)
+	}
+	if env.Detalhe != "arquivo saiu da pasta de saída e apareceu em backup" {
+		t.Errorf("o detalhe do caminho feliz mudou: %q", env.Detalhe)
+	}
+}
+
+func TestCA4_SemLinhaDeFimDeTransmissaoODetalheNaoAfirmaCodigoNenhum(t *testing.T) {
+	// `Vanish` deixa só a linha de INÍCIO: o arquivo sai da SAÍDA e não aparece em BACKUP. Não há
+	// código de falha para reportar — e a ausência dele NÃO é prova de que não houve falha, é
+	// ausência de evidência. O detalhe precisa continuar dizendo só o que sabe.
+	h := newHarness(t)
+	h.fake.Behavior = func(string) stcpfake.Behavior { return stcpfake.Vanish }
+	h.queue(remittanceName, remittanceContent)
+
+	h.run()
+
+	env := h.statusFor(envelope.Key(remittanceName))
+	if strings.Contains(env.Detalhe, "§11") {
+		t.Errorf("sem linha de fim de transmissão não há código a afirmar; veio: %q", env.Detalhe)
+	}
+	if env.Situacao != envelope.Review {
+		t.Errorf("situação = %q, esperava %q", env.Situacao, envelope.Review)
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CA3 — Idempotência: nome já processado NÃO aciona o cliente
 // ─────────────────────────────────────────────────────────────────────────────
@@ -337,6 +403,54 @@ func TestCA4_ExecucaoInterrompidaVaiParaRevisaoENuncaRetransmite(t *testing.T) {
 	}
 	if !strings.Contains(env.Detalhe, "conferência humana") {
 		t.Errorf("o detalhe deveria encaminhar para conferência humana; veio: %q", env.Detalhe)
+	}
+}
+
+// O caminho interrompido é onde o código do banco vale MAIS, e é por isso que ele tem teste próprio.
+//
+// Aqui ninguém sabe o que aconteceu: a intenção ficou gravada e o desfecho nunca foi registrado. Se
+// o cliente chegou a escrever uma linha de fim de transmissão para aquele nome antes de o processo
+// morrer, o que ela diz é a primeira informação que a conferência humana precisa — e sem isto ela
+// só chegaria embutida na linha crua, que ninguém lê por máquina.
+func TestCA4_InterrompidoCarregaOCodigoQueOClienteChegouAGravar(t *testing.T) {
+	h := newHarness(t)
+
+	// Encena o ciclo que MORREU: o cliente foi acionado de verdade e deixou a linha no log; o
+	// processo caiu antes do passo 5. Acionar o duplo direto, e não pelo agente, é o que reproduz
+	// esse estado — pelo agente o desfecho teria sido registrado, e aí não haveria interrupção.
+	if err := os.WriteFile(filepath.Join(h.outboundDir, remittanceName),
+		[]byte(remittanceContent), 0o600); err != nil {
+		t.Fatalf("depositar na saída: %v", err)
+	}
+	h.fake.Behavior = func(string) stcpfake.Behavior { return stcpfake.Reject }
+	h.fake.FailureCode = "000403"
+	if _, err := h.fake.Run(context.Background(), stcp.ModeSend, agent.FileFilter(remittanceName)); err != nil {
+		t.Fatalf("encenar o acionamento do ciclo anterior: %v", err)
+	}
+	chamadasAntes := len(h.fake.Calls())
+
+	if err := h.led.RecordIntent(remittanceName, h.now); err != nil {
+		t.Fatalf("gravar intenção: %v", err)
+	}
+	h.queue(remittanceName, remittanceContent)
+
+	h.run()
+
+	// A garantia do CA4 continua valendo: interrompido NUNCA retransmite.
+	if len(h.fake.Calls()) != chamadasAntes {
+		t.Fatalf("o cliente foi acionado de novo: %d → %d", chamadasAntes, len(h.fake.Calls()))
+	}
+
+	env := h.statusFor(envelope.Key(remittanceName))
+	if env.Situacao != envelope.Review {
+		t.Errorf("situação = %q, esperava %q", env.Situacao, envelope.Review)
+	}
+	if !strings.Contains(env.Detalhe, "000403") {
+		t.Errorf("o detalhe deveria carregar o código que o cliente gravou; veio: %q", env.Detalhe)
+	}
+	// E o encaminhamento para o humano continua na frase — o código acrescenta, não substitui.
+	if !strings.Contains(env.Detalhe, "conferência humana") {
+		t.Errorf("o código comeu o encaminhamento para conferência; veio: %q", env.Detalhe)
 	}
 }
 
