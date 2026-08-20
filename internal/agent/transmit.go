@@ -382,8 +382,8 @@ func (a *Agent) verdict(fileName string, exitCode *int, runErr error) (envelope.
 		// revisão, nunca para falha. Falha convidaria alguém a reenviar um arquivo que talvez tenha
 		// saído.
 		return envelope.Review, fmt.Sprintf(
-			"não foi possível conferir a evidência física de %q (saída: %v; backup: %v); desfecho desconhecido",
-			fileName, errOut, errBak)
+			"não foi possível conferir a evidência física de %q (saída: %s; backup: %s); desfecho desconhecido",
+			fileName, resumirErro(errOut), resumirErro(errBak))
 	}
 
 	switch {
@@ -392,14 +392,14 @@ func (a *Agent) verdict(fileName string, exitCode *int, runErr error) (envelope.
 		if runErr != nil {
 			// A evidência física é mais forte que o erro de execução: se o arquivo saiu, ele saiu.
 			// O erro fica registrado no detalhe para quem investigar.
-			detail += fmt.Sprintf("; o acionamento reportou erro (%v), mas a evidência física prevalece", runErr)
+			detail += fmt.Sprintf("; o acionamento reportou erro (%s), mas a evidência física prevalece", resumirErro(runErr))
 		}
 		return envelope.Transmitted, detail
 
 	case stillQueued:
 		detail := "arquivo permanece na pasta de saída; nada foi transmitido"
 		if runErr != nil {
-			detail += fmt.Sprintf("; falha ao acionar o cliente: %v", runErr)
+			detail += fmt.Sprintf("; falha ao acionar o cliente: %s", resumirErro(runErr))
 		} else if exitCode != nil {
 			detail += fmt.Sprintf("; código de saída do cliente: %d", *exitCode)
 		}

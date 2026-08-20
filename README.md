@@ -89,10 +89,28 @@ go test ./internal/envelope -update
 
 Mudou o contrato? Regenere aqui **e** replique no core-api. As duas metades mudam juntas — um golden que descreve algo que o produtor não produz é exatamente a divergência que ele existe para impedir.
 
-Dois detalhes do contrato que quebram o consumidor em silêncio se forem esquecidos:
+Três detalhes do contrato que quebram o consumidor em silêncio se forem esquecidos:
 
 - `logTransferencia` é **sempre** um array, nunca `null` — o consumidor recusa o envelope inteiro se `Array.isArray` falhar, e um slice nil em Go serializa como `null`;
-- `exitCode` é `null` quando o cliente **não foi executado** (caso do duplicado). Trocar por `0` diria "executou e deu certo" — a conclusão oposta.
+- `exitCode` é `null` quando o cliente **não foi executado** (caso do duplicado). Trocar por `0` diria "executou e deu certo" — a conclusão oposta;
+- `detalhe` tem teto de **512 caracteres** (`envelope.MaxDetailLength`) — caracteres, não bytes, porque é assim que o `varchar` do consumidor conta.
+
+### O teto do `detalhe`, e por que ele é cláusula e não estilo
+
+O campo não tinha tamanho declarado: aqui se escrevia sem teto, lá a coluna é dimensionada. Nenhum dos dois lados estava errado isoladamente — **o contrato é que estava incompleto**, e a conta chegou do lado do consumidor: em MySQL estrito, exceder é **erro, não truncamento**; o `INSERT` falha, a confirmação da remessa falha, e a varredura de lá **aborta na chave ruim em vez de pulá-la**, deixando sem confirmar toda remessa que ordene depois. Sem claim nem DLQ, o mesmo objeto é relido a cada passagem — a falha é permanente.
+
+Medido: o pior `detalhe` é o do desfecho **ambíguo** (`internal/agent/transmit.go`, evidência física ilegível), que interpola **dois** erros do sistema operacional, cada um com o caminho completo. **Um caminho de pasta de 102 caracteres já produzia 513.** Em Windows, cujo limite clássico é 260, isso é ordinário.
+
+A divisão acordada com o core-api (#20):
+
+| Quem | Faz o quê | Protege |
+| :-- | :-- | :-- |
+| **produtor** (aqui) | trunca e **marca** o corte, preservando o texto fixo | a **informação** — a frase que diz ao operador o que fazer |
+| **consumidor** (core-api) | garante que exceder nunca derrube o desfecho | o **registro do pagamento** |
+
+As duas metades, e não uma: só o produtor truncando, outro produtor futuro volta a derrubar a varredura de lá; só o consumidor defendendo, o corte cai onde calhar em vez de cair onde nós escolhemos.
+
+Onde cada garantia mora: o **piso** é `envelope.New`, por onde todo envelope passa — deixá-lo em cada chamador significaria que um chamador novo reabre o defeito sem que nada acuse. A **escolha de onde cortar** é do `agent` (`resumirErro`), que sabe qual parte da frase é instrução e qual é cauda de erro do SO. O corte é por runa, nunca por byte: fatiar bytes partiria um caractere acentuado ao meio e produziria JSON inválido — o texto é PT-BR, isso é o caso comum. E **nunca é silencioso**: diagnóstico cortado sem aviso é pior que ausente, porque parece completo.
 
 ---
 

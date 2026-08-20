@@ -19,6 +19,10 @@
 //  3. A chave do duplicado é distinta de propósito. Se sobrescrevesse o status original, uma remessa
 //     JÁ transmitida passaria a constar como não transmitida, e o operador reenviaria um pagamento
 //     que o banco já recebeu.
+//  4. `detalhe` tem teto declarado — `MaxDetailLength`. Ele não existia, e a ausência derrubava o
+//     consumidor: a coluna de lá é dimensionada, e em MySQL estrito exceder é ERRO, não
+//     truncamento. O `INSERT` falha, a confirmação falha, e a varredura de lá aborta na chave ruim
+//     em vez de pulá-la — toda remessa que ordene depois nunca é confirmada (#20).
 package envelope
 
 import (
@@ -27,6 +31,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Situation é o veredito do agente. O consumidor recusa valor fora desta lista com
@@ -131,6 +136,46 @@ type ReceptionInfo struct {
 	DuplicadoDe string `json:"duplicadoDe,omitempty"`
 }
 
+// MaxDetailLength é o teto do campo `detalhe`, em CARACTERES.
+//
+// Caracteres, não bytes, porque é assim que o consumidor conta: a coluna de lá é `varchar(512)` e o
+// `varchar` do MySQL dimensiona em caracteres. Medir aqui em bytes seria conservador por ~2% num
+// texto PT-BR acentuado — erraria para o lado seguro, mas erraria, e um teto que não é o teto do
+// outro lado deixa de ser cláusula de contrato para virar palpite.
+//
+// O número é acordado com o core-api (#20) e vale nos dois sentidos: aqui o produtor TRUNCA e
+// MARCA; lá o consumidor DEFENDE, garantindo que exceder nunca derrube o desfecho. As duas metades
+// protegem coisas diferentes — esta protege a informação, aquela protege o registro do pagamento.
+const MaxDetailLength = 512
+
+// truncationMark fecha um `detalhe` que não coube.
+//
+// A marca é inegociável, e não é cosmética: diagnóstico cortado em SILÊNCIO é pior que diagnóstico
+// ausente, porque parece completo. Quem lê um detalhe truncado sem aviso conclui que o erro
+// terminou ali, e para de procurar exatamente onde a informação começava a faltar.
+const truncationMark = " […]"
+
+// truncateDetail garante o teto do contrato.
+//
+// Roda no construtor, e não em cada chamador, porque é a única posição em que a garantia é
+// INESCAPÁVEL: todo envelope passa por aqui. Deixar a responsabilidade no ponto de interpolação
+// significaria que um chamador novo, escrito daqui a seis meses, reabre o defeito sem que nada
+// acuse — e o que acusaria seria a varredura do outro repositório travando em produção.
+//
+// O corte é por RUNA, nunca por byte: fatiar bytes partiria um caractere acentuado ao meio e
+// produziria JSON inválido para o consumidor. O texto deste agente é PT-BR — isso não é hipótese
+// remota, é o caso comum.
+//
+// A escolha de ONDE cortar mora no pacote `agent` (`resumirErro`): lá se sabe qual parte da
+// frase é instrução ao operador e qual é cauda de erro do sistema operacional. Aqui é só o piso.
+func truncateDetail(detail string) string {
+	if utf8.RuneCountInString(detail) <= MaxDetailLength {
+		return detail
+	}
+	runas := []rune(detail)
+	return string(runas[:MaxDetailLength-utf8.RuneCountInString(truncationMark)]) + truncationMark
+}
+
 // New monta um envelope com os invariantes já garantidos, e é o único construtor exportado de
 // propósito: montar a struct na mão permitiria um `LogTransferencia` nil, que serializa como `null`
 // e faz o consumidor recusar o envelope inteiro.
@@ -145,7 +190,7 @@ func New(fileName string, at time.Time, situation Situation, detail string, exit
 		// componente que decide pagamento é ambiguidade que aparece só no dia da divergência.
 		ExecutadoEm:      at.UTC().Format(time.RFC3339),
 		Situacao:         situation,
-		Detalhe:          detail,
+		Detalhe:          truncateDetail(detail),
 		ExitCode:         exitCode,
 		LogTransferencia: lines,
 	}

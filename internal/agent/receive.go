@@ -268,7 +268,7 @@ func (a *Agent) receiveOne(
 		// O acionamento reclamou, mas os arquivos estão na pasta e o conteúdo está no bucket. A
 		// evidência física prevalece, como na transmissão — o erro fica no detalhe para quem
 		// investigar.
-		detail += fmt.Sprintf("; o acionamento do cliente reportou erro (%v)", runErr)
+		detail += fmt.Sprintf("; o acionamento do cliente reportou erro (%s)", resumirErro(runErr))
 	}
 
 	out.Situation = situation

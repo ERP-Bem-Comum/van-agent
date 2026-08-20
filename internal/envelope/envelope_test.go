@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ERP-Bem-Comum/van-agent/internal/envelope"
 )
@@ -464,4 +465,89 @@ func TestChaveDeRemessaNaoCarregaCarimbo(t *testing.T) {
 			t.Errorf("a chave de %s perdeu o carimbo (%q); sem ele ela colide e apaga a anterior", nome, key)
 		}
 	}
+}
+
+// --- Teto do campo `detalhe` (#20) ---------------------------------------------------------------
+//
+// O teto existe por causa do CONSUMIDOR, não por estética: a coluna de lá é dimensionada e, em MySQL
+// estrito, exceder é ERRO — não truncamento. O `INSERT` falha, a confirmação falha, e a varredura de
+// lá aborta na chave ruim em vez de pulá-la, deixando sem confirmar toda remessa que ordene depois.
+// Um campo de diagnóstico não pode derrubar o registro de um desfecho de pagamento.
+
+// detalheGigante monta um detalhe muito acima do teto, todo acentuado de propósito: se o corte for
+// por byte em vez de por runa, ele parte um caractere ao meio e o JSON chega inválido ao consumidor.
+func detalheGigante() string {
+	return "instrução ao operador; " + strings.Repeat("é", 4_000)
+}
+
+func TestCA1_DetalheNuncaPassaDoTetoDoContrato(t *testing.T) {
+	env := envelope.New("PAG_000000.REM", time.Now(), envelope.Review, detalheGigante(), nil, nil)
+
+	if n := utf8.RuneCountInString(env.Detalhe); n > envelope.MaxDetailLength {
+		t.Errorf("detalhe com %d caracteres; o teto do contrato é %d", n, envelope.MaxDetailLength)
+	}
+
+	// O mesmo vale para o envelope de recepção: ele delega a `New` hoje, e este teste é o que
+	// impede que um refactor futuro monte a struct por fora e reabra o defeito em silêncio.
+	rec := envelope.NewReception("RET_000000.RET", time.Now(), envelope.Reception, detalheGigante(),
+		nil, nil, envelope.ReceptionInfo{Sha256: "abc", Chave: "retorno/RET_000000.RET"})
+	if n := utf8.RuneCountInString(rec.Detalhe); n > envelope.MaxDetailLength {
+		t.Errorf("detalhe da recepção com %d caracteres; o teto é %d", n, envelope.MaxDetailLength)
+	}
+}
+
+func TestCA2_DetalheCortadoEhSempreMarcado(t *testing.T) {
+	env := envelope.New("PAG_000000.REM", time.Now(), envelope.Review, detalheGigante(), nil, nil)
+
+	// Corte silencioso é pior que ausência: quem lê conclui que o erro terminou ali e para de
+	// procurar exatamente onde a informação começava a faltar.
+	if !strings.HasSuffix(env.Detalhe, "[…]") {
+		t.Errorf("detalhe cortado sem marca; termina em %q", ultimasRunas(env.Detalhe, 12))
+	}
+}
+
+func TestCA5_CorteDoDetalheRespeitaUTF8(t *testing.T) {
+	env := envelope.New("PAG_000000.REM", time.Now(), envelope.Review, detalheGigante(), nil, nil)
+
+	if !utf8.ValidString(env.Detalhe) {
+		t.Fatal("o corte partiu um caractere ao meio — o consumidor receberia JSON inválido")
+	}
+	// E o JSON precisa sobreviver à ida e à volta: é o que o consumidor faz com ele.
+	raw, err := envelope.Marshal(env)
+	if err != nil {
+		t.Fatalf("serializar: %v", err)
+	}
+	var volta envelope.Envelope
+	if err := json.Unmarshal(raw, &volta); err != nil {
+		t.Fatalf("o consumidor não conseguiria dar JSON.parse: %v", err)
+	}
+	if volta.Detalhe != env.Detalhe {
+		t.Error("o detalhe não sobreviveu à ida e volta pelo JSON")
+	}
+}
+
+func TestCA6_DetalheQueCabeNaoEhTocado(t *testing.T) {
+	// Esta é a garantia que protege o golden: o teto não pode reescrever nenhum envelope que já
+	// cabia. Se este teste cair, o corte está agressivo demais e o contrato mudou sem querer.
+	const original = "arquivo saiu da pasta de saída e apareceu em backup"
+
+	env := envelope.New("PAG_000000.REM", time.Now(), envelope.Transmitted, original, nil, nil)
+	if env.Detalhe != original {
+		t.Errorf("detalhe dentro do teto foi alterado:\nantes: %q\ndepois: %q", original, env.Detalhe)
+	}
+
+	// E o limite exato também passa intacto: o teto é inclusivo.
+	noLimite := strings.Repeat("a", envelope.MaxDetailLength)
+	if env := envelope.New("X.REM", time.Now(), envelope.Review, noLimite, nil, nil); env.Detalhe != noLimite {
+		t.Errorf("detalhe com exatamente %d caracteres foi cortado; o teto é inclusivo",
+			envelope.MaxDetailLength)
+	}
+}
+
+func ultimasRunas(s string, n int) string {
+	runas := []rune(s)
+	if len(runas) <= n {
+		return s
+	}
+	return string(runas[len(runas)-n:])
 }
