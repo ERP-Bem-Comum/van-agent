@@ -112,7 +112,7 @@ core-api/tests/modules/financial/adapters/van/status-envelope.golden.json   ← 
 O golden é **gerado, nunca editado à mão** (`go test ./internal/envelope -update`). Mudou o
 contrato? Regenere aqui **e** replique no core-api — as duas metades mudam juntas.
 
-Três coisas que quebram o consumidor em silêncio:
+Quatro coisas que quebram o consumidor em silêncio:
 
 1. `logTransferencia` é **sempre** array, nunca `null` — slice nil em Go serializa como `null` e o
    consumidor recusa o envelope inteiro. Por isso `envelope.New` é o único construtor exportado.
@@ -131,6 +131,15 @@ Três coisas que quebram o consumidor em silêncio:
 
 `Situation` é fechada (`transmitido`/`falha`/`revisao`/`recepcao`); valor fora da lista é recusado
 pelo consumidor.
+
+⚠️ **E o contrato não é só o envelope.** Desde 20/08/2026 o core-api também **LÊ os prefixos por nome
+de arquivo**: uma rota de download procura o objeto em `saida/` → `processados/` → `falhas/`, nessa
+ordem, e para no primeiro que existir (`sandbox/` fica fora de propósito). Ele **só lê** — quem move
+continua sendo este agente. Mas isso torna a chave do objeto um dado com prazo de validade, **e o
+prazo é nosso**: se o ciclo passar a mover para prefixo novo, ou a renomear ao mover, aquela rota
+**para de achar o arquivo em silêncio** — devolve "não encontrado", indistinguível de "arquivo
+antigo". Mudar prefixo ou renomear deixou de ser decisão interna deste repositório: avisar antes é o
+que impede a rota de passar a mentir.
 
 ## Pacotes
 
