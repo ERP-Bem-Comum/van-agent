@@ -110,6 +110,8 @@ A divisão acordada com o core-api (#20):
 
 As duas metades, e não uma: só o produtor truncando, outro produtor futuro volta a derrubar a varredura de lá; só o consumidor defendendo, o corte cai onde calhar em vez de cair onde nós escolhemos.
 
+**As marcas de corte dos dois lados são distintas de propósito** — aqui ` […]`, lá `… [truncado]`. Começou por acaso (nenhum dos dois sabia da outra) e virou decisão, porque a distinção carrega informação: os dois lados cortam no **mesmo teto**, então um produtor que respeite o contrato nunca entrega mais de 512 e o consumidor **nunca precisa cortar**. Logo, **a marca dele aparecer num `detalhe` é sinal de que o produtor está fora do contrato** — na prática, agente de versão antiga numa máquina não atualizada. Não é redundância defensiva; é detector. Igualar as duas marcas o mataria em silêncio: nada falharia, e o sinal simplesmente deixaria de existir. Por isso a nossa está **fixada em teste**, e não só combinada.
+
 Onde cada garantia mora: o **piso** é `envelope.New`, por onde todo envelope passa — deixá-lo em cada chamador significaria que um chamador novo reabre o defeito sem que nada acuse. A **escolha de onde cortar** é do `agent` (`resumirErro`), que sabe qual parte da frase é instrução e qual é cauda de erro do SO. O corte é por runa, nunca por byte: fatiar bytes partiria um caractere acentuado ao meio e produziria JSON inválido — o texto é PT-BR, isso é o caso comum. E **nunca é silencioso**: diagnóstico cortado sem aviso é pior que ausente, porque parece completo.
 
 ### ⚠️ O contrato não é só o envelope: o core-api LÊ os prefixos por nome de arquivo
