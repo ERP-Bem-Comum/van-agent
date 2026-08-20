@@ -26,6 +26,15 @@ import (
 	"fmt"
 )
 
+// ErrOrphanEnvelope marca o único desfecho que o ciclo NÃO consegue retomar sozinho: a publicação
+// falhou e a pendência não pôde ser registrada nem na segunda tentativa.
+//
+// É sentinela, e não só texto, porque quem lê precisa poder DECIDIR sobre ela — o binário separa
+// esta linha das demais na saída de erro. Um órfão e uma falha comum de publicação pedem ações
+// opostas ("vá olhar o bucket agora" contra "o próximo ciclo resolve"), e duas situações opostas
+// saindo pela mesma porta é o que faz alguém tratar a grave como rotina.
+var ErrOrphanEnvelope = errors.New("envelope órfão: sem publicação e sem retomada")
+
 // publishEnvelope publica o corpo na chave, deixando rastro durável enquanto a publicação não se
 // confirma.
 //
@@ -41,15 +50,38 @@ func (a *Agent) publishEnvelope(ctx context.Context, key, fileName string, body 
 		return nil
 	}
 
-	if err := a.pending.Save(key, fileName, string(body), a.cfg.Clock()); err != nil {
+	if errRegistro := a.pending.Save(key, fileName, string(body), a.cfg.Clock()); errRegistro != nil {
 		// Falhar aqui NÃO impede a publicação: o registro é rede de segurança, e recusar-se a
 		// publicar por causa dele trocaria uma falha possível por uma falha certa. O que se perde é
 		// a retomada, e o erro sobe junto para que isso apareça.
-		if err := a.store.Put(ctx, key, body); err != nil {
-			return fmt.Errorf("publicar status em %q: %w", key, err)
+		errPublicacao := a.store.Put(ctx, key, body)
+		if errPublicacao == nil {
+			return fmt.Errorf("publicar status em %q funcionou, mas a pendência não pôde ser registrada "+
+				"antes (uma falha futura nesta chave não seria retomada): %w", key, errRegistro)
 		}
-		return fmt.Errorf("publicar status em %q funcionou, mas a pendência não pôde ser registrada "+
-			"antes (uma falha futura nesta chave não seria retomada): %w", key, err)
+
+		// As DUAS falharam: disco local e bucket, no mesmo instante. É o único caminho que ainda
+		// produzia órfão — o desfecho não foi publicado e não ficou registrado, o passo seguinte
+		// move o objeto para fora da fila assim mesmo, e o registro já diz `done`. Nada volta a
+		// passar por ali: o objeto fica no bucket sem desfecho, para sempre.
+		//
+		// Segunda tentativa de registrar, e ela não é teimosia: a primeira pode ter falhado por
+		// causa transitória (disco momentaneamente cheio, arquivo travado por antivírus na máquina
+		// Windows), e o custo de tentar de novo é uma escrita local contra a alternativa de perder
+		// o desfecho de um pagamento.
+		if err := a.pending.Save(key, fileName, string(body), a.cfg.Clock()); err == nil {
+			return fmt.Errorf("publicar status em %q falhou e o registro de pendência só funcionou na "+
+				"segunda tentativa (será republicado no próximo ciclo): %w", key, errPublicacao)
+		}
+
+		// Não há mais nada a fazer pelo código. O que resta é NÃO deixar isto parecer uma falha
+		// comum: as duas situações pedem ações opostas — "o próximo ciclo resolve" e "vá olhar o
+		// bucket agora" — e sair pela mesma porta é o que faz alguém tratar a segunda como a
+		// primeira.
+		return fmt.Errorf("%w: status de %q em %q não foi publicado E não ficou registrado "+
+			"(o disco local e o bucket falharam juntos); NENHUM ciclo vai retomar isto sozinho — "+
+			"o objeto fica no bucket sem desfecho até alguém agir: %w",
+			ErrOrphanEnvelope, fileName, key, errPublicacao)
 	}
 
 	if err := a.store.Put(ctx, key, body); err != nil {

@@ -9,6 +9,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,31 @@ type orfaoHarness struct {
 	now      time.Time
 }
 
-func newOrfaoHarness(t *testing.T) *orfaoHarness {
+// pendenciaComSaveQuebrado encena o disco local recusando a escrita do registro — disco cheio,
+// permissão perdida, arquivo travado por antivírus na máquina Windows.
+//
+// Embrulha o registro REAL em vez de substituí-lo: o que interessa é o comportamento do agente
+// quando o `Save` falha, não um registro inteiro de mentira.
+type pendenciaComSaveQuebrado struct {
+	ledger.PendingEnvelopes
+	falhasRestantes int
+	tentativas      int
+}
+
+func (p *pendenciaComSaveQuebrado) Save(key, fileName, body string, at time.Time) error {
+	p.tentativas++
+	if p.falhasRestantes > 0 {
+		p.falhasRestantes--
+		return errRegistroIndisponivel
+	}
+	return p.PendingEnvelopes.Save(key, fileName, body, at)
+}
+
+var errRegistroIndisponivel = &erroDeBucket{"registro de pendências indisponível (encenado pelo teste)"}
+
+// newOrfaoHarness monta a instalação. O parâmetro variádico permite embrulhar o registro de
+// pendências sem que os chamadores existentes mudem — e sem duplicar quarenta linhas de preparo.
+func newOrfaoHarness(t *testing.T, envolver ...func(ledger.PendingEnvelopes) ledger.PendingEnvelopes) *orfaoHarness {
 	t.Helper()
 
 	root := t.TempDir()
@@ -110,11 +135,16 @@ func newOrfaoHarness(t *testing.T) *orfaoHarness {
 	h.fake.InboundDir = inboundDir
 	h.fake.Now = func() time.Time { return h.now }
 
+	var registro ledger.PendingEnvelopes = pending
+	for _, e := range envolver {
+		registro = e(registro)
+	}
+
 	ag, err := agent.New(h.store, led, h.fake, sp, agent.Config{
 		Prefixes:    h.prefixes,
 		NamePattern: namePattern,
 		Clock:       func() time.Time { return h.now },
-	}, agent.WithReceptionIndex(index), agent.WithPendingEnvelopes(pending))
+	}, agent.WithReceptionIndex(index), agent.WithPendingEnvelopes(registro))
 	if err != nil {
 		t.Fatalf("montar agente: %v", err)
 	}
@@ -203,6 +233,100 @@ func TestCA13_RecepcaoComPublicacaoQueFalhaDeixaPendenciaERepublicaNoCicloSeguin
 	// CA3 — a pendência sai depois do sucesso, senão vira republicação eterna.
 	if p := h.pendentes(); len(p) != 0 {
 		t.Errorf("a pendência precisava ser limpa após a publicação; restaram %d", len(p))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// O último caminho que ainda produzia órfão: disco local E bucket falhando juntos
+//
+// Levantado por uma pergunta do core-api — "existe algum estado em que a pendência é abandonada?".
+// Existia: se o `Save` falhasse e o `Put` falhasse na mesma passagem, o desfecho não era publicado
+// e não ficava registrado; o passo seguinte movia o objeto para fora da fila assim mesmo e o
+// registro já dizia `done`. Nada voltava a passar por ali.
+//
+// Do lado de quem consome, esse objeto vira quarentena por proveniência ausente — indistinguível de
+// um arquivo que nunca deveria ter entrado. Um pagamento nosso parecendo arquivo alheio, para sempre.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestCA13_RegistroQueFalhaUmaVezEhTentadoDeNovoEAPendenciaSobrevive(t *testing.T) {
+	// Falha SÓ na primeira chamada: é a causa transitória — disco momentaneamente cheio, arquivo
+	// travado por um instante. A segunda tentativa é o que separa "perdeu o desfecho" de
+	// "republicou no ciclo seguinte".
+	var registro *pendenciaComSaveQuebrado
+	h := newOrfaoHarness(t, func(p ledger.PendingEnvelopes) ledger.PendingEnvelopes {
+		registro = &pendenciaComSaveQuebrado{PendingEnvelopes: p, falhasRestantes: 1}
+		return registro
+	})
+	h.store.falharEmStatus = true
+	h.store.Seed(h.prefixes.Outbound+remittanceName, []byte(remittanceContent))
+
+	sum, err := h.ag.TransmitCycle(context.Background())
+	if err != nil {
+		t.Fatalf("ciclo abortou: %v", err)
+	}
+	if registro.tentativas < 2 {
+		t.Fatalf("o registro precisava ser tentado de novo depois de o `Put` falhar; tentativas: %d",
+			registro.tentativas)
+	}
+	if len(h.pendentes()) != 1 {
+		t.Fatalf("a pendência precisa existir depois da segunda tentativa; veio %d", len(h.pendentes()))
+	}
+	for _, e := range sum.Errs() {
+		if errors.Is(e, agent.ErrOrphanEnvelope) {
+			t.Errorf("não é órfão: a retomada existe. Erro: %v", e)
+		}
+	}
+
+	// E a prova de que a retomada é real: o ciclo seguinte, com o bucket de volta, publica.
+	h.store.falharEmStatus = false
+	if _, err := h.ag.TransmitCycle(context.Background()); err != nil {
+		t.Fatalf("segundo ciclo abortou: %v", err)
+	}
+	if len(h.pendentes()) != 0 {
+		t.Errorf("a pendência deveria ter sido limpa após republicar; restam %d", len(h.pendentes()))
+	}
+	if _, err := h.store.Get(context.Background(), sum.Outcomes[0].StatusKey); err != nil {
+		t.Errorf("o envelope deveria ter sido republicado: %v", err)
+	}
+}
+
+func TestCA13_DiscoEBucketFalhandoJuntosAcusamOrfaoEmVezDeSilenciar(t *testing.T) {
+	// O disco NUNCA aceita: nem a primeira tentativa nem a segunda. Aqui o código chegou ao fim do
+	// que pode fazer — e o que ainda está na mão dele é não deixar isto parecer falha comum.
+	var registro *pendenciaComSaveQuebrado
+	h := newOrfaoHarness(t, func(p ledger.PendingEnvelopes) ledger.PendingEnvelopes {
+		registro = &pendenciaComSaveQuebrado{PendingEnvelopes: p, falhasRestantes: 99}
+		return registro
+	})
+	h.store.falharEmStatus = true
+	h.store.Seed(h.prefixes.Outbound+remittanceName, []byte(remittanceContent))
+
+	sum, err := h.ag.TransmitCycle(context.Background())
+	if err != nil {
+		t.Fatalf("ciclo abortou: %v", err)
+	}
+
+	// A pendência de fato não existe — o cenário é o pior caso, não uma encenação parcial.
+	if n := len(h.pendentes()); n != 0 {
+		t.Fatalf("cenário inválido: a pendência não podia existir; vieram %d", n)
+	}
+	if registro.tentativas < 2 {
+		t.Errorf("o registro precisa ser tentado duas vezes antes de desistir; tentativas: %d",
+			registro.tentativas)
+	}
+
+	// O que se exige: que o erro seja RECONHECÍVEL como órfão, e não só mais uma linha na lista.
+	// Uma falha comum de publicação diz "o próximo ciclo resolve"; esta diz "vá olhar o bucket".
+	// Saírem pela mesma porta é o que faz alguém tratar a segunda como a primeira.
+	var achou bool
+	for _, e := range sum.Errs() {
+		if errors.Is(e, agent.ErrOrphanEnvelope) {
+			achou = true
+		}
+	}
+	if !achou {
+		t.Errorf("o ciclo precisa acusar %v; erros vieram como: %v",
+			agent.ErrOrphanEnvelope, errors.Join(sum.Errs()...))
 	}
 }
 

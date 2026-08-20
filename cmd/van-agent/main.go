@@ -161,7 +161,7 @@ func cycle(mode string, buildStore storeBuilder) int {
 
 	report(mode, storeLabel, cfg.NamePattern, cfg.NameMaxLength, summary)
 	if errs := summary.Errs(); len(errs) > 0 {
-		fmt.Fprintf(os.Stderr, "o ciclo acumulou %d erro(s): %v\n", len(errs), errors.Join(errs...))
+		relatarErros(errs)
 		return exitSoftware
 	}
 	return exitOK
@@ -245,10 +245,39 @@ func receive() int {
 
 	reportReception(summary)
 	if errs := summary.Errs(); len(errs) > 0 {
-		fmt.Fprintf(os.Stderr, "o ciclo acumulou %d erro(s): %v\n", len(errs), errors.Join(errs...))
+		relatarErros(errs)
 		return exitSoftware
 	}
 	return exitOK
+}
+
+// relatarErros imprime os erros do ciclo, SEPARANDO os que nenhum ciclo seguinte vai retomar.
+//
+// A separação existe porque as duas categorias pedem ações opostas: um erro comum de publicação é
+// "o próximo ciclo resolve", e um envelope órfão é "vá olhar o bucket agora, ou o desfecho de um
+// pagamento fica perdido". Misturados na mesma lista, o grave lê como rotina — que é exatamente
+// como um item importante passa despercebido numa saída com vinte linhas.
+//
+// O código de saída continua sendo o mesmo (70): quem agenda não distingue categorias, e inventar
+// um código novo quebraria o contrato do Agendador de Tarefas por uma informação que pertence ao
+// texto, não ao status.
+func relatarErros(errs []error) {
+	fmt.Fprintf(os.Stderr, "o ciclo acumulou %d erro(s): %v\n", len(errs), errors.Join(errs...))
+
+	var orfaos []error
+	for _, e := range errs {
+		if errors.Is(e, agent.ErrOrphanEnvelope) {
+			orfaos = append(orfaos, e)
+		}
+	}
+	if len(orfaos) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"\n⚠️  AÇÃO HUMANA NECESSÁRIA — %d desfecho(s) sem publicação e sem retomada.\n"+
+			"Nenhum ciclo seguinte resolve isto sozinho; há objeto no bucket que o backend não\n"+
+			"consegue interpretar, e ele é indistinguível de um arquivo que nunca deveria ter entrado.\n%v\n",
+		len(orfaos), errors.Join(orfaos...))
 }
 
 func reportReception(summary agent.ReceiveSummary) {
