@@ -466,14 +466,44 @@ func (a *Agent) transferLogFor(fileName string) ([]string, stcp.SendOutcome) {
 // linha de fim de transmissão, ou o log pode não ter sido lido — o padrão do nome é configuração e
 // segue sendo palpite até alguém medir a instalação. Por isso o texto afirma só o que sabe: que o
 // cliente registrou aquele código.
+//
+// ⚠️ O acréscimo RESERVA o próprio espaço, e essa é a parte que não é óbvia.
+//
+// O piso do contrato (`envelope.MaxDetailLength`) corta pelo FIM, e o código entra no fim. Sem
+// reserva, o campo que esta função existe para entregar é o PRIMEIRO a cair — e cai justamente no
+// caminho mais longo, o do desfecho ambíguo, que interpola dois erros do sistema operacional.
+//
+// Medido antes de existir a reserva, no caminho ambíguo: com nome de 34 caracteres (o que a própria
+// suíte usa) o detalhe já saía em 518 e o piso mutilava a referência ao §11; a partir de 40 a
+// referência sumia; a partir de 60 o CÓDIGO sumia. Ele sobrevivia por acidente de ordem das
+// palavras — o número aparece cedo na frase acrescentada —, não por garantia.
+//
+// A prioridade que a reserva impõe é deliberada: **instrução ao operador > código do banco > cauda
+// do erro do SO**. O código é diagnóstico de decisão (manda olhar a tabela do §11); a cauda de um
+// erro do SO é caminho e mensagem localizada. Do lado do consumidor, `detalhe` truncado SEM código é
+// indistinguível de "não houve código" — que é a conclusão oposta.
 func comCodigoDoBanco(detail string, envio stcp.SendOutcome) string {
 	if envio.FailureCode == "" {
 		return detail
 	}
 	// O código tem 6 posições no §12 (campo 7), então o acréscimo é curto e limitado por
 	// construção — não passa pelo orçamento de `resumirErro`, que existe para erro do SO.
-	return detail + fmt.Sprintf("; o cliente registrou o código %s no log (tabela do §11, pp. 24-29)",
+	sufixo := fmt.Sprintf("; o cliente registrou o código %s no log (tabela do §11, pp. 24-29)",
 		envio.FailureCode)
+
+	sobra := envelope.MaxDetailLength - utf8.RuneCountInString(sufixo)
+	if utf8.RuneCountInString(detail) <= sobra {
+		return detail + sufixo
+	}
+	// Não cabe: corta o DETALHE — nunca o sufixo — e marca. A marca fica ANTES do código, então
+	// quem lê vê nesta ordem: instrução, corte declarado, código. Nenhuma das três é adivinhada.
+	corte := sobra - utf8.RuneCountInString(marcaDeCorte)
+	if corte <= 0 {
+		// Inalcançável com o texto atual (o sufixo tem ~71 caracteres contra um teto de 512), mas
+		// fatiar com índice negativo entraria em pânico dentro de um ciclo que já mexeu no mundo.
+		return detail + sufixo
+	}
+	return string([]rune(detail)[:corte]) + marcaDeCorte + sufixo
 }
 
 // publishAndSegregate cobre os desfechos em que o ciclo recusa o arquivo ANTES de qualquer
