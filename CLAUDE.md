@@ -130,11 +130,18 @@ Quatro coisas que quebram o consumidor em silêncio:
    classifica pela chave. Renomear qualquer um quebra o outro lado.
 4. `detalhe` tem teto de **512 caracteres** (`envelope.MaxDetailLength`), garantido em `envelope.New`
    — caracteres, não bytes, porque é assim que o `varchar` do consumidor conta. Sem o teto, um
-   detalhe longo derruba o `INSERT` de lá (erro, não truncamento), a confirmação falha, e a varredura
-   do core-api **aborta na chave ruim em vez de pulá-la**: toda remessa que ordene depois deixa de ser
-   confirmada, para sempre. Quem escolhe **onde** cortar é `agent.resumirErro`, que preserva a
-   instrução ao operador e come a cauda do erro do SO — e marca o corte, porque diagnóstico cortado em
-   silêncio parece completo.
+   detalhe longo derruba o `INSERT` de lá (erro, não truncamento) e a confirmação daquela remessa
+   falha, indo para o balde `persistFailed`. **O teto continua sendo o que impede o `INSERT` de
+   falhar em primeiro lugar** — uma confirmação que não chega é uma remessa que o core-api não sabe
+   que saiu. Quem escolhe **onde** cortar é `agent.resumirErro`, que preserva a instrução ao operador
+   e come a cauda do erro do SO — e marca o corte, porque diagnóstico cortado em silêncio parece
+   completo.
+   > ⚠️ Esta cláusula já foi justificada por um estrago **maior**, e a diferença importa para quem
+   > pensar em afrouxá-la: até 20/08/2026 a varredura do core-api **abortava na chave ruim em vez de
+   > pulá-la**, então um único detalhe longo impedia que toda remessa cuja chave ordenasse depois
+   > fosse confirmada, para sempre. Isso foi corrigido lá (`55a17952`, PR #783): hoje toda ramificação
+   > tem balde próprio e a varredura segue. **O raio encolheu; a causa não.** O acordo do #20 vale
+   > inteiro — aqui o produtor TRUNCA e MARCA, lá o consumidor DEFENDE.
 
 `Situation` é fechada (`transmitido`/`falha`/`revisao`/`recepcao`); valor fora da lista é recusado
 pelo consumidor.

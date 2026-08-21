@@ -64,6 +64,19 @@ type ReceiveSummary struct {
 	// o cliente registrou", nunca "o cliente não registrou nada" — a distinção é o que impede o
 	// consumidor de represar pagamento com base numa ignorância disfarçada de conclusão.
 	LogDoCicloLido bool
+	// LogEncontrado diz se algum arquivo casou o padrão e foi lido — a PRIMEIRA das duas condições
+	// de `LogDoCicloLido`, isolada.
+	//
+	// Existe só para o RELATÓRIO, e por isso não entra no envelope: o consumidor decide com
+	// `logDoCicloLido`, que é a conjunção, e acrescentar um campo mudaria a forma do contrato para
+	// resolver um problema que é de quem lê o console.
+	//
+	// ⚠️ Sem isto, os dois modos de `false` ficam indistinguíveis na saída, e o aviso precisa
+	// escolher uma causa. Ele escolhia o padrão do log — que é a única das duas que NÃO se aplica
+	// quando o log foi lido e o ciclo é que não teve transferência. Um alerta que nomeia a causa
+	// errada com confiança treina quem lê a desacreditá-lo, e ciclo ocioso é o caso comum: em
+	// produção o agente roda pelo agendador muitas vezes por dia e transmite poucas.
+	LogEncontrado bool
 	// Republicados conta envelopes de ciclos anteriores cuja publicação só se confirmou agora.
 	// Diferente de zero significa que houve órfão no bucket até esta passada.
 	Republicados int
@@ -128,8 +141,9 @@ func (a *Agent) ReceiveCycle(ctx context.Context) (ReceiveSummary, error) {
 	// Falha ao ler o log NÃO aborta: o log é diagnóstico, e sem ele os arquivos continuam sendo
 	// depositados, apenas sem correlação. Abortar aqui descartaria arquivos do banco por causa de um
 	// arquivo de apoio.
-	records, logDoCicloLido := a.receptionRecords(inicioDoCiclo, a.cfg.Clock())
+	records, logDoCicloLido, logEncontrado := a.receptionRecords(inicioDoCiclo, a.cfg.Clock())
 	summary.LogDoCicloLido = logDoCicloLido
+	summary.LogEncontrado = logEncontrado
 
 	// PASSO 3 — listar a pasta de entrada.
 	names, err := a.sp.ListInbound()
@@ -372,10 +386,19 @@ const clockSkewMargin = time.Second
 // dentro desta janela. A segunda condição é o que impede o modo de falha diário — o nome do log
 // começa por data (§7, p.15), então no primeiro ciclo do dia o padrão casa o log de ONTEM, e uma
 // leitura bem-sucedida de um log real não diz nada sobre o que acabou de acontecer.
-func (a *Agent) receptionRecords(from, to time.Time) ([]stcp.Record, bool) {
+//
+// O TERCEIRO retorno isola a primeira dessas condições, e existe porque a conjunção sozinha não
+// diz ao operador o que fazer: "não li log nenhum" se conserta mexendo no padrão ou na pasta, e
+// "li e não havia linha desta execução" não se conserta — é o ciclo ocioso, e é o caso comum.
+// Fundir os dois obriga o relatório a chutar uma causa. Quem publica no envelope continua sendo
+// só a conjunção; este retorno não atravessa a fronteira.
+func (a *Agent) receptionRecords(from, to time.Time) (records []stcp.Record, doCicloLido, encontrado bool) {
 	raw, read, err := a.sp.ReadTransferLog()
 	if err != nil || !read {
-		return nil, false
+		// Erro ao ler entra aqui junto com "não casou nada", e de propósito: nos dois o conteúdo do
+		// log é desconhecido. `encontrado` afirma que ele foi LIDO, não que o arquivo existe — saber
+		// que existe não autoriza conclusão nenhuma sobre o que ele registra.
+		return nil, false, false
 	}
 
 	doCiclo := stcp.WithinWindow(stcp.ParseLog(raw), from.Add(-clockSkewMargin), to.Add(clockSkewMargin))
@@ -384,7 +407,7 @@ func (a *Agent) receptionRecords(from, to time.Time) ([]stcp.Record, bool) {
 	// registrou nesta execução continua desconhecido. Afirmar o contrário daria à ausência de
 	// correlação uma confiança que nada sustenta — e é sobre essa confiança que o consumidor decide
 	// represar pagamento.
-	return doCiclo, len(doCiclo) > 0
+	return doCiclo, len(doCiclo) > 0, true
 }
 
 // receiveDuplicate trata a reaparição de um conteúdo já recebido.
