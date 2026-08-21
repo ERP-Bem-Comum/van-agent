@@ -24,6 +24,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -285,7 +286,7 @@ func reportReception(summary agent.ReceiveSummary, logGlob, logDir string) {
 	if summary.Republicados > 0 {
 		fmt.Printf("⚠️  envelopes de ciclos anteriores republicados agora: %d\n", summary.Republicados)
 	}
-	relatarLeituraDoLog(summary, logGlob, logDir)
+	relatarLeituraDoLog(os.Stdout, summary, logGlob, logDir)
 	for _, o := range summary.Outcomes {
 		correlacao := "sem correlação no log"
 		if o.Correlated {
@@ -323,7 +324,11 @@ func reportReception(summary agent.ReceiveSummary, logGlob, logDir string) {
 // O que o envelope publica NÃO muda: lá continua indo só a conjunção (`logDoCicloLido`), porque é
 // ela que o consumidor usa para decidir, e o contrato do `status/` só muda com as duas metades
 // acordando junto.
-func relatarLeituraDoLog(summary agent.ReceiveSummary, logGlob, logDir string) {
+//
+// Escreve num `io.Writer` em vez de direto no stdout para que os três ramos sejam exercitáveis por
+// teste. A verificação em campo alcança dois deles; o terceiro é o SILÊNCIO, e silêncio é o único
+// desfecho que nenhuma inspeção de console distingue de "a função não rodou".
+func relatarLeituraDoLog(w io.Writer, summary agent.ReceiveSummary, logGlob, logDir string) {
 	switch {
 	case summary.LogDoCicloLido:
 		// Terceiro estado: o log foi lido e traz linha desta execução. Silêncio — a correlação de
@@ -333,15 +338,21 @@ func relatarLeituraDoLog(summary agent.ReceiveSummary, logGlob, logDir string) {
 		// Primeiro estado: nenhum arquivo casou o padrão, ou casou e não pôde ser lido. É defeito de
 		// configuração, tem conserto, e é o único dos três que justifica mandar conferir o padrão —
 		// por isso os valores em uso vão na mensagem: quem lê está numa máquina, sem o `.env` à mão.
-		fmt.Printf("⚠️  nenhum log foi lido (padrão %q em %q) — a correlação está DESLIGADA neste "+
-			"ciclo; conferir VAN_AGENT_STCP_TRANSFER_LOG_GLOB e a pasta de log\n", logGlob, logDir)
+		//
+		// O padrão sai com `%q` e a pasta com `%s`, e a assimetria não é descuido. O padrão precisa
+		// das aspas porque espaço ou caractere invisível nele é justamente uma das formas de ele não
+		// casar nada — sem delimitador, `"*.LOG "` e `"*.LOG"` são a mesma linha na tela. Já a pasta
+		// é caminho do Windows, e `%q` escaparia cada `\` como `\\`: o operador leria
+		// `C:\\STCP\\LOG` e passaria a duvidar do caminho, que é o oposto de ajudar.
+		fmt.Fprintf(w, "⚠️  nenhum log foi lido (padrão %q na pasta %s) — a correlação está DESLIGADA "+
+			"neste ciclo; conferir VAN_AGENT_STCP_TRANSFER_LOG_GLOB e a pasta de log\n", logGlob, logDir)
 
 	default:
 		// Segundo estado: o log foi lido e não havia linha carimbada nesta janela. É o ciclo sem
 		// transferência, e também o log de ONTEM no primeiro ciclo do dia (§7, p.15). Não é defeito e
 		// não leva `⚠️` — mas a ressalva sobre a correlação permanece, porque ela é sobre o que o
 		// agente NÃO sabe, e isso não mudou.
-		fmt.Println("log lido, sem linha desta execução — normal em ciclo sem transferência; " +
+		fmt.Fprintln(w, "log lido, sem linha desta execução — normal em ciclo sem transferência; "+
 			"nenhuma ausência de correlação abaixo diz respeito ao arquivo")
 	}
 }
