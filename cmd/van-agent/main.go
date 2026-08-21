@@ -243,7 +243,7 @@ func receive() int {
 		return exitSoftware
 	}
 
-	reportReception(summary)
+	reportReception(summary, cfg.Spool.TransferLogGlob, cfg.Spool.LogDir)
 	if errs := summary.Errs(); len(errs) > 0 {
 		relatarErros(errs)
 		return exitSoftware
@@ -280,17 +280,12 @@ func relatarErros(errs []error) {
 		len(orfaos), errors.Join(orfaos...))
 }
 
-func reportReception(summary agent.ReceiveSummary) {
+func reportReception(summary agent.ReceiveSummary, logGlob, logDir string) {
 	fmt.Printf("modo recepcao concluído · arquivos na pasta de entrada: %d\n", len(summary.Outcomes))
 	if summary.Republicados > 0 {
 		fmt.Printf("⚠️  envelopes de ciclos anteriores republicados agora: %d\n", summary.Republicados)
 	}
-	if !summary.LogDoCicloLido {
-		// Não é erro, e por isso precisa ser dito: o ciclo funciona sem o log, mas nenhuma correlação
-		// deste ciclo é confiável, e a causa costuma ser o padrão do log apontando para o lugar errado.
-		fmt.Println("⚠️  o log DESTA execução não foi lido; nenhuma ausência de correlação abaixo " +
-			"diz respeito ao arquivo — conferir VAN_AGENT_STCP_TRANSFER_LOG_GLOB e a pasta de log")
-	}
+	relatarLeituraDoLog(summary, logGlob, logDir)
 	for _, o := range summary.Outcomes {
 		correlacao := "sem correlação no log"
 		if o.Correlated {
@@ -303,6 +298,51 @@ func reportReception(summary agent.ReceiveSummary) {
 	// ninguém percebe.
 	for _, ausente := range summary.LoggedButAbsent {
 		fmt.Printf("  ⚠️  %s consta no log deste ciclo e NÃO estava na pasta de entrada\n", ausente)
+	}
+}
+
+// relatarLeituraDoLog diz qual dos TRÊS estados da leitura do log está em curso.
+//
+// ⚠️ Isto já foi uma frase só, e a frase estava errada de um jeito que só aparece em campo: ela
+// mandava conferir `VAN_AGENT_STCP_TRANSFER_LOG_GLOB` sempre que `logDoCicloLido` fosse `false` —
+// mas essa conjunção é `false` por DUAS razões independentes, e a do padrão é justamente a que não
+// se aplica no caso comum. Medido numa instalação de apoio: com o padrão corrigido e o log sendo
+// lido, o aviso continuava palavra por palavra, apontando para o que tinha acabado de ser
+// consertado.
+//
+// O caso comum é ciclo ocioso. O agente é one-shot, roda pelo agendador muitas vezes por dia e
+// transmite poucas — então o log não tem linha DESTA execução quase sempre, e a frase única ficaria
+// ligada em quase todo ciclo de uma instalação perfeitamente configurada. Alerta que fica ligado
+// quase sempre não é alerta: é treino para ignorar o caso em que ele está certo.
+//
+// Daí a separação por SEVERIDADE, e não só por texto: só o primeiro estado é defeito, e só ele leva
+// `⚠️`. O segundo é rotina e sai sem marca — mas sai, porque continua sendo verdade que nenhuma
+// ausência de correlação abaixo diz respeito ao arquivo, e calar isso devolveria ao operador a
+// conclusão que o `logDoCicloLido` existe para negar.
+//
+// O que o envelope publica NÃO muda: lá continua indo só a conjunção (`logDoCicloLido`), porque é
+// ela que o consumidor usa para decidir, e o contrato do `status/` só muda com as duas metades
+// acordando junto.
+func relatarLeituraDoLog(summary agent.ReceiveSummary, logGlob, logDir string) {
+	switch {
+	case summary.LogDoCicloLido:
+		// Terceiro estado: o log foi lido e traz linha desta execução. Silêncio — a correlação de
+		// cada arquivo já aparece na linha dele, e repetir aqui só somaria ruído ao caso saudável.
+
+	case !summary.LogEncontrado:
+		// Primeiro estado: nenhum arquivo casou o padrão, ou casou e não pôde ser lido. É defeito de
+		// configuração, tem conserto, e é o único dos três que justifica mandar conferir o padrão —
+		// por isso os valores em uso vão na mensagem: quem lê está numa máquina, sem o `.env` à mão.
+		fmt.Printf("⚠️  nenhum log foi lido (padrão %q em %q) — a correlação está DESLIGADA neste "+
+			"ciclo; conferir VAN_AGENT_STCP_TRANSFER_LOG_GLOB e a pasta de log\n", logGlob, logDir)
+
+	default:
+		// Segundo estado: o log foi lido e não havia linha carimbada nesta janela. É o ciclo sem
+		// transferência, e também o log de ONTEM no primeiro ciclo do dia (§7, p.15). Não é defeito e
+		// não leva `⚠️` — mas a ressalva sobre a correlação permanece, porque ela é sobre o que o
+		// agente NÃO sabe, e isso não mudou.
+		fmt.Println("log lido, sem linha desta execução — normal em ciclo sem transferência; " +
+			"nenhuma ausência de correlação abaixo diz respeito ao arquivo")
 	}
 }
 

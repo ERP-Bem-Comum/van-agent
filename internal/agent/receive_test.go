@@ -386,6 +386,64 @@ func TestCA5_LogDeOutroCicloNaoContaComoLogDesteCiclo(t *testing.T) {
 	}
 }
 
+// Os DOIS modos de `LogDoCicloLido == false` precisam ser distinguíveis, e quem os separa é
+// `LogEncontrado`.
+//
+// A conjunção sozinha não diz ao operador o que fazer, e a diferença decide ação oposta: "nenhum
+// arquivo casou o padrão" tem conserto na configuração, e "li o log e não havia linha desta
+// execução" NÃO tem conserto — é o ciclo ocioso, que é o caso comum num agente one-shot que roda
+// muitas vezes por dia e transmite poucas.
+//
+// Sem esta separação o relatório precisa escolher uma causa, e escolhia a do padrão. Medido numa
+// instalação de apoio: com o padrão corrigido e o log sendo lido, o aviso continuava mandando
+// conferir o padrão. Alerta que nomeia a causa errada com confiança treina quem lê a desacreditá-lo.
+//
+// ⚠️ `LogEncontrado` NÃO atravessa a fronteira. O envelope continua publicando só a conjunção
+// (`logDoCicloLido`), porque é ela que o consumidor usa para decidir, e o contrato do `status/` só
+// muda com as duas metades acordando junto — este campo é do relatório, e o golden é a prova de que
+// a forma do envelope não mudou.
+func TestCA5_LogEncontradoSeparaOsDoisModosDeNaoTerLidoOLogDoCiclo(t *testing.T) {
+	t.Run("nenhum arquivo casou o padrão", func(t *testing.T) {
+		h := newReceiveHarness(t)
+		h.entrega(returnName, returnContent, false) // nada é escrito no log
+
+		sum := h.run()
+
+		if sum.LogDoCicloLido {
+			t.Fatal("não havia log algum; a conjunção precisa ser falsa")
+		}
+		if sum.LogEncontrado {
+			t.Error("nenhum arquivo de log existia — afirmar que um foi lido esconderia o único dos " +
+				"dois casos que tem conserto na configuração")
+		}
+	})
+
+	t.Run("log lido, sem linha desta execução", func(t *testing.T) {
+		h := newReceiveHarness(t)
+
+		// Um ciclo de ontem deixou o log preenchido...
+		h.now = h.now.AddDate(0, 0, -1)
+		h.avancaRelogio()
+		h.entrega("PAG_000000.20260817110000_0001.RET", "retorno de ontem", true)
+		h.run()
+
+		// ...e hoje o cliente ainda não escreveu log novo, mas o padrão casa o de ontem.
+		h.now = h.now.AddDate(0, 0, 1)
+		h.avancaRelogio()
+		h.entrega(returnName, returnContent, false)
+
+		sum := h.run()
+
+		if sum.LogDoCicloLido {
+			t.Fatal("o log casado é de outro ciclo; a conjunção precisa ser falsa")
+		}
+		if !sum.LogEncontrado {
+			t.Error("o log de ontem FOI lido com sucesso — negar isso faz o relatório culpar um padrão " +
+				"que está correto, que é exatamente o defeito que esta separação existe para fechar")
+		}
+	})
+}
+
 // Linha de recepção de um ciclo ANTERIOR, com o mesmo nome, não pode correlacionar o arquivo de
 // agora.
 //
