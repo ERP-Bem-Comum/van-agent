@@ -21,8 +21,11 @@
 //     que o banco já recebeu.
 //  4. `detalhe` tem teto declarado — `MaxDetailLength`. Ele não existia, e a ausência derrubava o
 //     consumidor: a coluna de lá é dimensionada, e em MySQL estrito exceder é ERRO, não
-//     truncamento. O `INSERT` falha, a confirmação falha, e a varredura de lá aborta na chave ruim
-//     em vez de pulá-la — toda remessa que ordene depois nunca é confirmada (#20).
+//     truncamento. O `INSERT` falha e a confirmação daquela remessa falha (#20).
+//     Na época em que o teto foi acordado, o estrago era MAIOR: a varredura de lá abortava na chave
+//     ruim em vez de pulá-la, e toda remessa que ordenasse depois nunca mais era confirmada. Isso
+//     foi corrigido no core-api em 20/08/2026 (`55a17952`, PR #783) — o raio encolheu para uma
+//     remessa, a causa não mudou, e o teto continua sendo o que impede o `INSERT` de falhar.
 package envelope
 
 import (

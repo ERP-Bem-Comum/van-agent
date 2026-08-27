@@ -205,9 +205,11 @@ Daí o par de campos no envelope:
 | :-- | :-- | :-- |
 | `true` | `true` | o cliente registrou ter recebido este arquivo nesta execução |
 | `true` | `false` | o log desta execução foi lido e **não** trazia o arquivo — origem não registrada, caso a revisar |
-| `false` | `false` | o agente **não sabe**: o log desta execução não foi lido. Não é indício sobre o arquivo, e sim sobre a **configuração do log** na instalação |
+| `false` | `false` | o agente **não sabe**: não há linha desta execução em que se apoiar. Não é indício sobre o arquivo |
 
 A terceira linha é a que existe para não ser confundida com a segunda. Um consumidor que represe por não-correlação sem olhar `logDoCicloLido` represaria todo retorno do primeiro ciclo do dia, diariamente, por um padrão de log mal configurado — e um sinal errado é pior que sinal nenhum, porque o consumidor obedece a ele.
+
+⚠️ **`logDoCicloLido: false` tem DUAS causas, e só uma tem conserto.** Ela é a conjunção de "o log foi lido" **e** "ele traz linha desta janela": falha a primeira quando nenhum arquivo casa o padrão (defeito de configuração), e falha a segunda quando o log foi lido e o ciclo não teve transferência — que **não** é defeito, é o ciclo ocioso, e é o caso comum num agente que roda muitas vezes por dia e transmite poucas. O envelope publica só a conjunção, porque é ela que o consumidor usa para decidir; **o relatório do console separa as duas** (`agent.ReceiveSummary.LogEncontrado`), e só a primeira sai com `⚠️`. Fundi-las obrigava o aviso a nomear uma causa — e ele nomeava o padrão, justamente a que não se aplica no caso comum. Medido: com o padrão corrigido e o log sendo lido, o aviso antigo continuava mandando conferir o padrão.
 
 ⚠️ O carimbo do log não traz zona: é a hora local da máquina que roda o cliente, e é assim que o agente o interpreta. Um erro de fuso aqui não desloca a janela para longe do log de ontem — desloca para longe do log de **hoje**.
 
