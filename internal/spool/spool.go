@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ERP-Bem-Comum/van-agent/internal/stcp"
 )
 
 // Spool é o que o ciclo precisa das pastas da instalação.
@@ -247,39 +249,11 @@ func (d *Dir) InBackup(fileName string) (bool, error) {
 		if !caixaImportaNoSistema {
 			nome = strings.ToLower(nome)
 		}
-		if resto, achou := strings.CutPrefix(nome, alvo+"."); achou && ehCarimbo(resto) {
+		if resto, achou := strings.CutPrefix(nome, alvo+"."); achou && stcp.IsArchiveStamp(resto) {
 			return true, nil
 		}
 	}
 	return false, nil
-}
-
-// ehCarimbo reconhece o sufixo que o cliente acrescenta ao arquivar.
-//
-// Dois formatos foram medidos na instalação, e a regra cobre os dois sem cravar largura:
-//
-//	SAIDA\BACKUP\     ARQUIVO.REM.20260826192709822   17 · YYYYMMDDHHMMSS + milissegundos
-//	ENTRADA\RESTART\  ARQUIVO.RET.202607010707090000  18 · data/hora OFTP + contador de 4 dígitos
-//
-// Exigir 14 dígitos é o que separa carimbo de extensão: `.REM` e `.RET` não casam, nem um `.1`
-// solto. Aceitar dígitos ALÉM dos 14 é o que cobre as duas larguras sem eleger uma delas por
-// acidente da amostra — quando isto foi escrito havia duas do formato de 17 e trinta e quatro do
-// de 18, e nada garante que não exista uma terceira.
-//
-// Os 14 primeiros precisam formar uma data plausível. Sem essa checagem, `.99999999999999999`
-// passaria: o que se está reconhecendo é o instante do arquivamento, não uma sequência qualquer de
-// algarismos.
-func ehCarimbo(s string) bool {
-	if len(s) < 14 {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	_, err := time.Parse("20060102150405", s[:14])
-	return err == nil
 }
 
 // ReadTransferLog lê o log posicional mais recente que casa com o padrão configurado.

@@ -137,7 +137,9 @@ func TestEncenacaoDeSucessoProduzAEvidenciaFisicaQueOAgenteLe(t *testing.T) {
 	if len(registros) == 0 {
 		t.Fatal("nenhuma linha no log; o envelope sairia sem evidência de transferência")
 	}
-	if registros[0].FileName != remessa {
+	// `CanonicalName`, e não `FileName`: o campo 9 traz o CAMINHO do arquivo, como o cliente real
+	// grava. Comparar o campo cru com o nome é o defeito que deixava `logTransferencia` vazio.
+	if registros[0].CanonicalName() != remessa {
 		t.Errorf("a linha do log nomeia %q, esperava %q", registros[0].FileName, remessa)
 	}
 
@@ -253,8 +255,21 @@ func TestRecepcaoEntregaNaPastaDeEntradaEDeixaLinhaNoLog(t *testing.T) {
 		t.Fatalf("o arquivo não foi entregue na pasta de ENTRADA: %v", err)
 	}
 	registros := h.logDoCiclo(t)
-	if len(registros) == 0 || registros[0].FileName != retorno {
-		t.Error("a entrega precisa deixar linha de recepção no log; sem ela o envelope sai não correlacionado")
+	if len(registros) == 0 {
+		t.Fatal("a entrega precisa deixar linha de recepção no log; sem ela o envelope sai não correlacionado")
+	}
+	// As duas linhas do MESMO retorno apontam para caminhos diferentes — a `0006` para
+	// `entrada\restart\` com o nome ainda carimbado, a `0007` para `entrada\` com o nome final.
+	// Afirmar que AMBAS colapsam no mesmo nome canônico é o que impede o retorno de ser contado duas
+	// vezes, e a versão carimbada de virar um recebido que nunca esteve na pasta.
+	for i, r := range registros {
+		if r.CanonicalName() != retorno {
+			t.Errorf("linha %d (op %s) nomeia %q, que canoniza para %q; esperava %q",
+				i, r.Op, r.FileName, r.CanonicalName(), retorno)
+		}
+	}
+	if len(registros) != 2 {
+		t.Errorf("a recepção de um arquivo deixa DUAS linhas (início e fim), veio %d", len(registros))
 	}
 }
 
