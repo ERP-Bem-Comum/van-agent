@@ -163,8 +163,17 @@ func (f *Fake) Run(_ context.Context, mode stcp.Mode, fileFilter string) (*int, 
 			if err := os.MkdirAll(f.BackupDir, 0o750); err != nil {
 				return nil, err
 			}
-			// §5, p.13 — sai da SAÍDA, vai para BACKUP.
-			if err := os.Rename(filepath.Join(f.OutboundDir, name), filepath.Join(f.BackupDir, name)); err != nil {
+			// §5, p.13 — sai da SAÍDA, vai para BACKUP. E o cliente ARQUIVA RENOMEANDO: acrescenta ao
+			// nome o carimbo do instante em que concluiu (`.YYYYMMDDHHMMSSmmm`), medido na instalação
+			// em 27/08/2026. O manual não documenta o rename, e o duplo o omitia.
+			//
+			// A omissão não era detalhe: enquanto o duplo movia com o nome idêntico, todo critério de
+			// aceite que afirma `transmitido` confirmava uma premissa que a instalação real desmente.
+			// A suíte ficava verde e a produção publicava `revisao` em toda remessa bem-sucedida. Um
+			// duplo fiel ao manual não é fiel ao cliente quando o manual é incompleto.
+			t := f.Now().In(time.Local)
+			arquivado := fmt.Sprintf("%s.%s%03d", name, t.Format("20060102150405"), t.Nanosecond()/int(time.Millisecond))
+			if err := os.Rename(filepath.Join(f.OutboundDir, name), filepath.Join(f.BackupDir, arquivado)); err != nil {
 				return nil, err
 			}
 			lines = append(lines,

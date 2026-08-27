@@ -200,3 +200,115 @@ func comArquivos(t *testing.T, nomes ...string) string {
 	}
 	return dir
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// O cliente ARQUIVA RENOMEANDO (medido na instalação em 27/08/2026)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Este bloco existe por causa de um defeito que chegou a produção: `InBackup` procurava o nome
+// EXATO, o cliente arquiva com carimbo, e por isso `transmitido` era inalcançável — duas remessas
+// que o banco aceitou saíram como `revisao`. A suíte não pegou porque o duplo movia com o nome
+// idêntico, fiel a um manual que não documenta o rename (§5, p.13).
+
+func comBackup(t *testing.T, nomes ...string) *Dir {
+	t.Helper()
+	d, err := NewDir(Config{
+		OutboundDir:     t.TempDir(),
+		BackupDir:       comArquivos(t, nomes...),
+		LogDir:          t.TempDir(),
+		TransferLogGlob: "*.log.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+const remessa = "PAG_000000.20260818120000_000001.REM"
+
+// As duas larguras medidas na instalação precisam ser reconhecidas. Cravar uma delas deixaria a
+// outra de fora, e não há nada que garanta que existam só duas.
+func TestInBackupReconheceOArquivamentoCarimbado(t *testing.T) {
+	for _, c := range []struct{ nome, arquivado string }{
+		{"carimbo de 17 dígitos, como o BACKUP da transmissão", remessa + ".20260818120005822"},
+		{"carimbo de 18 dígitos, como o timestamp OFTP", remessa + ".202608181200050000"},
+		{"sem carimbo, para a instalação que não renomeie (§8)", remessa},
+	} {
+		t.Run(c.nome, func(t *testing.T) {
+			ok, err := comBackup(t, c.arquivado).InBackup(remessa)
+			if err != nil {
+				t.Fatalf("InBackup: %v", err)
+			}
+			if !ok {
+				t.Errorf("%q não foi reconhecido como o arquivamento de %q; o desfecho cairia no ramo "+
+					"ambíguo e a remessa sairia como `revisao`", c.arquivado, remessa)
+			}
+		})
+	}
+}
+
+// O reconhecimento é ESTRITO, e a razão é a assimetria de custo: um falso negativo devolve
+// `revisao`, que é caro mas seguro; um falso positivo afirma `transmitido` sobre um arquivo que não
+// saiu, e aí ninguém reenvia. Estes são os casos que um `HasPrefix` cru aceitaria.
+func TestInBackupRecusaSufixoQueNaoEhCarimbo(t *testing.T) {
+	for _, c := range []struct{ nome, arquivado string }{
+		{"sufixo alfabético", remessa + ".backup"},
+		{"dígitos de menos para uma data", remessa + ".123"},
+		{"dígitos suficientes, data impossível", remessa + ".99999999999999999"},
+		{"dígitos com letra no meio", remessa + ".2026081812000x822"},
+		{"outra remessa que compartilha o prefixo", remessa + "2.20260818120005822"},
+	} {
+		t.Run(c.nome, func(t *testing.T) {
+			ok, err := comBackup(t, c.arquivado).InBackup(remessa)
+			if err != nil {
+				t.Fatalf("InBackup: %v", err)
+			}
+			if ok {
+				t.Errorf("%q foi aceito como arquivamento de %q; isso publicaria `transmitido` sobre "+
+					"uma remessa que pode não ter saído", c.arquivado, remessa)
+			}
+		})
+	}
+}
+
+// Backup vazio e backup ausente são "não está lá", nunca erro: o desfecho de um pagamento não pode
+// depender de um `os.Stat` a mais, e quem cobra a existência das pastas é o boot.
+func TestInBackupSemOArquivoNaoEhErro(t *testing.T) {
+	vazio := comBackup(t)
+	if ok, err := vazio.InBackup(remessa); ok || err != nil {
+		t.Errorf("backup vazio: ok=%v err=%v; esperado false, nil", ok, err)
+	}
+
+	ausente, err := NewDir(Config{
+		OutboundDir:     t.TempDir(),
+		BackupDir:       filepath.Join(t.TempDir(), "nao-existe"),
+		LogDir:          t.TempDir(),
+		TransferLogGlob: "*.log.txt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := ausente.InBackup(remessa); ok || err != nil {
+		t.Errorf("backup ausente: ok=%v err=%v; esperado false, nil", ok, err)
+	}
+}
+
+// A caixa segue o regime do sistema, como já faz o padrão do log (#17). No Windows — a plataforma
+// de destino, onde ninguém roda a suíte — dois nomes que só diferem na caixa são o MESMO arquivo, e
+// exigir caixa exata deixaria o arquivamento sem ser reconhecido.
+func TestInBackupSegueORegimeDeCaixaDoSistema(t *testing.T) {
+	original := caixaImportaNoSistema
+	t.Cleanup(func() { caixaImportaNoSistema = original })
+
+	arquivado := "pag_000000.20260818120000_000001.rem.20260818120005822"
+
+	caixaImportaNoSistema = false
+	if ok, err := comBackup(t, arquivado).InBackup(remessa); err != nil || !ok {
+		t.Errorf("onde a caixa não importa, %q deveria casar %q (ok=%v err=%v)", arquivado, remessa, ok, err)
+	}
+
+	caixaImportaNoSistema = true
+	if ok, err := comBackup(t, arquivado).InBackup(remessa); err != nil || ok {
+		t.Errorf("onde a caixa importa, %q NÃO deveria casar %q (ok=%v err=%v)", arquivado, remessa, ok, err)
+	}
+}
