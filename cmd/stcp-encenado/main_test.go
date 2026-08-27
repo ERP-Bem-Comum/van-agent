@@ -128,8 +128,8 @@ func TestEncenacaoDeSucessoProduzAEvidenciaFisicaQueOAgenteLe(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.saida, remessa)); !os.IsNotExist(err) {
 		t.Error("o arquivo continua na pasta de saída; o agente leria isso como nada transmitido")
 	}
-	if _, err := os.Stat(filepath.Join(h.backup, remessa)); err != nil {
-		t.Errorf("o arquivo não apareceu em backup: %v", err)
+	if arquivadoEmBackup(t, h.backup, remessa) == "" {
+		t.Error("o arquivo não apareceu em backup")
 	}
 
 	// §12, p.30 — o log posicional, que alimenta o `logTransferencia` do envelope.
@@ -137,7 +137,9 @@ func TestEncenacaoDeSucessoProduzAEvidenciaFisicaQueOAgenteLe(t *testing.T) {
 	if len(registros) == 0 {
 		t.Fatal("nenhuma linha no log; o envelope sairia sem evidência de transferência")
 	}
-	if registros[0].FileName != remessa {
+	// `CanonicalName`, e não `FileName`: o campo 9 traz o CAMINHO do arquivo, como o cliente real
+	// grava. Comparar o campo cru com o nome é o defeito que deixava `logTransferencia` vazio.
+	if registros[0].CanonicalName() != remessa {
 		t.Errorf("a linha do log nomeia %q, esperava %q", registros[0].FileName, remessa)
 	}
 
@@ -166,9 +168,35 @@ func TestFiltroDoAgenteEhHonrado(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.saida, intruso)); err != nil {
 		t.Error("o arquivo fora do filtro foi transmitido; o `-f` não está sendo respeitado")
 	}
-	if _, err := os.Stat(filepath.Join(h.backup, remessa)); err != nil {
+	if arquivadoEmBackup(t, h.backup, remessa) == "" {
 		t.Error("o arquivo dentro do filtro não foi transmitido")
 	}
+}
+
+// arquivadoEmBackup devolve o nome com que o arquivo foi arquivado, ou "" se não estiver lá.
+//
+// O cliente ARQUIVA RENOMEANDO, acrescentando o carimbo do instante em que concluiu — medido na
+// instalação em 27/08/2026, e ausente do manual (§5, p.13 diz apenas "move para backup"). O
+// critério aqui é de propósito mais frouxo que o de `spool.ehCarimbo`: uma asserção que validasse
+// o carimbo igual à produção concordaria com o código por construção.
+func arquivadoEmBackup(t *testing.T, dir, nome string) string {
+	t.Helper()
+	entradas, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("ler a pasta de BACKUP: %v", err)
+	}
+	for _, e := range entradas {
+		if e.IsDir() {
+			continue
+		}
+		if e.Name() == nome || strings.HasPrefix(e.Name(), nome+".") {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 // A recusa deixa o arquivo onde está — é o desfecho que o agente publica como `falha`.
@@ -227,8 +255,21 @@ func TestRecepcaoEntregaNaPastaDeEntradaEDeixaLinhaNoLog(t *testing.T) {
 		t.Fatalf("o arquivo não foi entregue na pasta de ENTRADA: %v", err)
 	}
 	registros := h.logDoCiclo(t)
-	if len(registros) == 0 || registros[0].FileName != retorno {
-		t.Error("a entrega precisa deixar linha de recepção no log; sem ela o envelope sai não correlacionado")
+	if len(registros) == 0 {
+		t.Fatal("a entrega precisa deixar linha de recepção no log; sem ela o envelope sai não correlacionado")
+	}
+	// As duas linhas do MESMO retorno apontam para caminhos diferentes — a `0006` para
+	// `entrada\restart\` com o nome ainda carimbado, a `0007` para `entrada\` com o nome final.
+	// Afirmar que AMBAS colapsam no mesmo nome canônico é o que impede o retorno de ser contado duas
+	// vezes, e a versão carimbada de virar um recebido que nunca esteve na pasta.
+	for i, r := range registros {
+		if r.CanonicalName() != retorno {
+			t.Errorf("linha %d (op %s) nomeia %q, que canoniza para %q; esperava %q",
+				i, r.Op, r.FileName, r.CanonicalName(), retorno)
+		}
+	}
+	if len(registros) != 2 {
+		t.Errorf("a recepção de um arquivo deixa DUAS linhas (início e fim), veio %d", len(registros))
 	}
 }
 

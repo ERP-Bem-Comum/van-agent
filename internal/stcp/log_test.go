@@ -241,3 +241,109 @@ func linhaDeTeste(carimbo, op, resultado, nome string) string {
 	return buildLine(carimbo, op, "PERFIL-DE-TESTE", "STCPCLT", "00001234", "00005678",
 		resultado, "240", nome, "")
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// O campo 9 traz CAMINHO, não nome (medido na instalação em 27/08/2026)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Estes casos usam as strings REAIS do log da instalação, com separador do Windows, e é isso que os
+// torna mais fortes que o duplo: o `stcpfake` monta caminhos com o separador da máquina em que a
+// suíte roda, então sozinho ele nunca exercitaria o corte por `\` — que é o único que existe em
+// produção. O perfil e o convênio estão trocados por fictícios.
+func TestCanonicalNameTiraOCaminhoEOCarimbo(t *testing.T) {
+	for _, c := range []struct{ nome, campo9, esperado string }{
+		{
+			"transmissão · op 0004/0005",
+			`D:\STCP\DADOS\PERFIL-DE-TESTE\saida\PAG_000000.20260818120000_000001.REM`,
+			"PAG_000000.20260818120000_000001.REM",
+		},
+		{
+			"recepção em curso · op 0006 · carimbo de 18 dígitos",
+			`D:\STCP\DADOS\PERFIL-DE-TESTE\entrada\restart\PAG_000000.20260818110000_0001.RET.202608181100050000`,
+			"PAG_000000.20260818110000_0001.RET",
+		},
+		{
+			"recepção concluída · op 0007 · sem carimbo",
+			`D:\STCP\DADOS\PERFIL-DE-TESTE\entrada\PAG_000000.20260818110000_0001.RET`,
+			"PAG_000000.20260818110000_0001.RET",
+		},
+		{
+			"carimbo de 17 dígitos, como o do BACKUP",
+			`D:\STCP\DADOS\PERFIL-DE-TESTE\saida\PAG_000000.20260818120000_000001.REM.20260818120005822`,
+			"PAG_000000.20260818120000_000001.REM",
+		},
+		{
+			"separador POSIX, para o duplo e para S3-compatível",
+			"/var/spool/saida/PAG_000000.20260818120000_000001.REM",
+			"PAG_000000.20260818120000_000001.REM",
+		},
+		{
+			"sem caminho nenhum atravessa intacto",
+			"PAG_000000.20260818120000_000001.REM",
+			"PAG_000000.20260818120000_000001.REM",
+		},
+		{
+			"a extensão NÃO é confundida com carimbo",
+			`D:\saida\ARQUIVO.REM`,
+			"ARQUIVO.REM",
+		},
+		{
+			"sufixo numérico curto demais para ser carimbo fica onde está",
+			`D:\saida\ARQUIVO.REM.123`,
+			"ARQUIVO.REM.123",
+		},
+		{
+			"dígitos suficientes mas data impossível não é carimbo",
+			`D:\saida\ARQUIVO.REM.99999999999999999`,
+			"ARQUIVO.REM.99999999999999999",
+		},
+	} {
+		t.Run(c.nome, func(t *testing.T) {
+			got := stcp.Record{FileName: c.campo9}.CanonicalName()
+			if got != c.esperado {
+				t.Errorf("CanonicalName(%q) = %q, esperava %q", c.campo9, got, c.esperado)
+			}
+		})
+	}
+}
+
+// As DUAS linhas de um mesmo retorno precisam colapsar. Sem isto, `ReceivedFileNames` devolve dois
+// nomes por arquivo, e o carimbado — que nunca existe na pasta de entrada — vira um alarme de
+// "recebido que sumiu antes de alguém olhar", inventado pelo próprio parser.
+func TestAsDuasLinhasDeUmRetornoColapsamNoMesmoNome(t *testing.T) {
+	const nome = "PAG_000000.20260818110000_0001.RET"
+	registros := []stcp.Record{
+		{Op: stcp.OpReceiveStart, FileName: `D:\STCP\DADOS\PERFIL-DE-TESTE\entrada\restart\` + nome + ".202608181100050000"},
+		{Op: stcp.OpReceiveEnd, FileName: `D:\STCP\DADOS\PERFIL-DE-TESTE\entrada\` + nome},
+	}
+
+	nomes := stcp.ReceivedFileNames(registros)
+	if len(nomes) != 1 || nomes[0] != nome {
+		t.Errorf("ReceivedFileNames = %q; esperava exatamente [%q]", nomes, nome)
+	}
+
+	if linhas := stcp.ReceptionLinesFor(registros, nome); len(linhas) != 2 {
+		t.Errorf("ReceptionLinesFor devolveu %d linhas, esperava as 2 do retorno", len(linhas))
+	}
+}
+
+// A correlação da transmissão, contra o caminho real. É o caso que produzia `logTransferencia: []`
+// em produção enquanto a suíte inteira passava.
+func TestCorrelacaoDaTransmissaoCasaOCaminhoDoCampo9(t *testing.T) {
+	const nome = "PAG_000000.20260818120000_000001.REM"
+	const caminho = `D:\STCP\DADOS\PERFIL-DE-TESTE\saida\` + nome
+	registros := []stcp.Record{
+		{Op: stcp.OpSendStart, Result: stcp.ResultSuccess, FileName: caminho},
+		{Op: stcp.OpSendEnd, Result: stcp.ResultSuccess, FileName: caminho},
+		{Op: stcp.OpSendEnd, Result: stcp.ResultSuccess, FileName: `D:\STCP\DADOS\PERFIL-DE-TESTE\saida\OUTRO.REM`},
+	}
+
+	if linhas := stcp.FilterByFile(registros, nome); len(linhas) != 2 {
+		t.Errorf("FilterByFile devolveu %d linhas, esperava 2 — sem elas o envelope sai sem evidência", len(linhas))
+	}
+
+	out := stcp.SendOutcomeFor(registros, nome)
+	if !out.Started || !out.Finished || !out.Succeeded {
+		t.Errorf("SendOutcome = %+v; esperava início, fim e sucesso", out)
+	}
+}

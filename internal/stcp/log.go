@@ -82,6 +82,71 @@ type Record struct {
 // Succeeded reporta se a linha registra sucesso, conforme o campo 7.
 func (r Record) Succeeded() bool { return r.Result == ResultSuccess }
 
+// CanonicalName devolve o nome do arquivo do campo 9, sem o caminho e sem o carimbo.
+//
+// ⚠️ O cliente NÃO grava o nome no campo 9: grava o CAMINHO COMPLETO — e nem sempre o mesmo
+// caminho para o mesmo arquivo. Medido na instalação em 27/08/2026:
+//
+//	0004/0005  D:\…\<perfil>\saida\ARQUIVO.REM                    transmissão
+//	0006       D:\…\<perfil>\entrada\restart\ARQUIVO.RET.<carimbo> recepção em curso
+//	0007       D:\…\<perfil>\entrada\ARQUIVO.RET                   recepção concluída
+//
+// Comparar o campo cru contra o nome do arquivo nunca casava, e o efeito era silencioso:
+// `logTransferencia` saía `[]` em TODO envelope, `SendOutcome` saía zerado, e a recepção não
+// correlacionava linha nenhuma — sem que nada emitisse erro.
+//
+// São duas normalizações, e as duas são necessárias. Sem tirar o caminho, nada casa. Sem tirar o
+// carimbo, as linhas `0006` e `0007` do MESMO retorno viram dois arquivos diferentes, e o carimbado
+// aparece em `ReceivedFileNames` como um recebido que sumiu da pasta — um alarme que o parser
+// inventaria sozinho.
+//
+// `Raw` e `FileName` continuam crus: quem investiga precisa do caminho, e é dele que se descobre se
+// o arquivo veio de `entrada` ou de `entrada\restart`.
+func (r Record) CanonicalName() string {
+	nome := r.FileName
+	// `filepath.Base` NÃO serve aqui. Ele usa o separador da plataforma que está RODANDO, e no Linux
+	// — onde a suíte e o CI rodam — `\` não é separador: `filepath.Base` devolveria o caminho
+	// inteiro. Quem escreveu a linha foi um programa Windows, então o corte é pelo último separador
+	// de qualquer uma das duas convenções.
+	if i := strings.LastIndexAny(nome, `\/`); i >= 0 {
+		nome = nome[i+1:]
+	}
+	// `i > 0` e não `i >= 0`: um nome que COMEÇA com ponto não tem extensão, tem nome oculto, e
+	// cortá-lo deixaria string vazia.
+	if i := strings.LastIndex(nome, "."); i > 0 && IsArchiveStamp(nome[i+1:]) {
+		nome = nome[:i]
+	}
+	return nome
+}
+
+// IsArchiveStamp reconhece o carimbo que o cliente acrescenta ao arquivar.
+//
+// A regra vive aqui, e não em `spool`, porque é comportamento do CLIENTE — o mesmo carimbo aparece
+// no campo 9 do log e no nome do arquivo em BACKUP, e uma regra só descreve os dois.
+//
+// Dois formatos foram medidos na instalação, e a regra cobre ambos sem cravar largura:
+//
+//	SAIDA\BACKUP\     ARQUIVO.REM.20260826192709822   17 · YYYYMMDDHHMMSS + milissegundos
+//	ENTRADA\RESTART\  ARQUIVO.RET.202607010707090000  18 · data/hora OFTP + contador de 4 dígitos
+//
+// Exigir 14 dígitos é o que separa carimbo de extensão: `.REM` e `.RET` não casam, nem um `.1`
+// solto. Aceitar dígitos ALÉM dos 14 cobre as duas larguras sem eleger uma por acidente da amostra.
+//
+// Os 14 primeiros precisam formar uma data plausível. Sem isso, `.99999999999999999` passaria: o que
+// se reconhece é o instante do arquivamento, não uma sequência qualquer de algarismos.
+func IsArchiveStamp(s string) bool {
+	if len(s) < 14 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	_, err := time.Parse(OccurredAtLayout, s[:14])
+	return err == nil
+}
+
 // Time decodifica o campo 1 no fuso LOCAL, e o segundo retorno diz se deu.
 //
 // ⚠️ O fuso não é detalhe: quem escreve esta linha é o cliente do banco, rodando na mesma máquina
@@ -186,7 +251,9 @@ func ParseLog(content string) []Record {
 func FilterByFile(records []Record, fileName string) []Record {
 	out := make([]Record, 0, len(records))
 	for _, r := range records {
-		if r.FileName == fileName {
+		// A comparação é contra o nome CANÔNICO, nunca contra o campo 9 cru: ele traz caminho
+		// completo, e às vezes com carimbo. Ver `CanonicalName`.
+		if r.CanonicalName() == fileName {
 			out = append(out, r)
 		}
 	}
@@ -272,11 +339,16 @@ func ReceivedFileNames(records []Record) []string {
 		if r.Op != OpReceiveStart && r.Op != OpReceiveEnd {
 			continue
 		}
-		if r.FileName == "" || seen[r.FileName] {
+		// O nome canônico é o que colapsa as duas linhas do MESMO retorno. A `0006` aponta para
+		// `entrada\restart\ARQUIVO.RET.<carimbo>` e a `0007` para `entrada\ARQUIVO.RET`: sem
+		// normalizar, cada retorno entraria aqui DUAS vezes, e a versão carimbada — que nunca existe
+		// na pasta de entrada — seria reportada como um recebido que sumiu antes de alguém olhar.
+		nome := r.CanonicalName()
+		if nome == "" || seen[nome] {
 			continue
 		}
-		seen[r.FileName] = true
-		out = append(out, r.FileName)
+		seen[nome] = true
+		out = append(out, nome)
 	}
 	return out
 }

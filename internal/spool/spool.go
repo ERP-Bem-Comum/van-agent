@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ERP-Bem-Comum/van-agent/internal/stcp"
 )
 
 // Spool é o que o ciclo precisa das pastas da instalação.
@@ -200,7 +202,59 @@ func exists(dir, fileName string) (bool, error) {
 func (d *Dir) InOutbound(fileName string) (bool, error) { return exists(d.cfg.OutboundDir, fileName) }
 
 // InBackup reporta se o arquivo apareceu em BACKUP.
-func (d *Dir) InBackup(fileName string) (bool, error) { return exists(d.cfg.BackupDir, fileName) }
+//
+// ⚠️ O cliente NÃO move o arquivo com o mesmo nome: ele ARQUIVA RENOMEANDO, acrescentando um
+// carimbo do instante em que a transmissão concluiu — `ARQUIVO.REM` vira
+// `ARQUIVO.REM.20260827144136918`. O manual não documenta isso; o §5 (p.13) diz apenas que o
+// arquivo é "movido" para BACKUP. Foi medido na instalação em 27/08/2026.
+//
+// Enquanto esta função procurava o nome EXATO, `transmitido` era inalcançável: o arquivo sumia da
+// SAÍDA, não "aparecia" em BACKUP, e todo desfecho caía no ramo ambíguo de `agent.verdict`. Duas
+// remessas que o banco aceitou (`000000` no log de transferências) foram publicadas como `revisao`
+// — e `revisao` do outro lado vira o balde que só se esvazia por descarte, que é justamente o
+// caminho por onde um pagamento sai duas vezes.
+//
+// O reconhecimento é ESTRITO, e nunca por prefixo. A assimetria de custo é quem manda: um falso
+// negativo devolve `revisao`, que é revisão humana — caro, mas seguro. Um falso positivo afirmaria
+// `transmitido` sobre um arquivo que não saiu, o consumidor daria a remessa por enviada e ninguém
+// reenviaria. Por isso o que vem depois do ponto precisa ser um carimbo de verdade.
+func (d *Dir) InBackup(fileName string) (bool, error) {
+	// Caminho rápido, e também o caso de uma instalação que não renomeie: o §8 mostra o backup como
+	// opção de perfil, e nada garante que toda configuração carimbe. Também é aqui que o nome é
+	// validado — `exists` passa por `safeJoin` antes de tocar o disco.
+	if ok, err := exists(d.cfg.BackupDir, fileName); err != nil || ok {
+		return ok, err
+	}
+
+	entries, err := os.ReadDir(d.cfg.BackupDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Mesma leitura que `exists` já dava para pasta ausente: não está lá. Quem cobra a
+			// existência das pastas é o boot, e transformar isso em erro faria o desfecho de um
+			// pagamento depender de um `os.Stat` a mais.
+			return false, nil
+		}
+		return false, fmt.Errorf("ler pasta de backup: %w", err)
+	}
+
+	alvo := fileName
+	if !caixaImportaNoSistema {
+		alvo = strings.ToLower(alvo)
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		nome := e.Name()
+		if !caixaImportaNoSistema {
+			nome = strings.ToLower(nome)
+		}
+		if resto, achou := strings.CutPrefix(nome, alvo+"."); achou && stcp.IsArchiveStamp(resto) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // ReadTransferLog lê o log posicional mais recente que casa com o padrão configurado.
 //

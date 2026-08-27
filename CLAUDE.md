@@ -58,10 +58,33 @@ marco do épico #6 não é código, é infra**: bucket e MySQL no ambiente de ap
 ponta a ponta. Ao pegar este repo, não procure o que implementar — procure o que ainda não foi
 *observado*.
 
-Duas pendências que nenhum Go resolve, e que só a instalação real fecha: o nome do arquivo do log
-posicional nunca foi medido (padrão que não casa ⇒ `logDoCicloLido: false` em todo retorno, sem que
-nada emita erro), e o teto de 26 caracteres do nome não foi confirmado com o banco (erro 1101,
-§11 p.26 — procedimento condicional, duas condições não verificadas).
+### O que a instalação real ensinou em 27/08/2026
+
+O agente rodou em produção pela primeira vez em 26/08 e **publicou o desfecho errado nas duas
+primeiras remessas**. As duas foram aceitas pelo banco (`Fim de transmissao com sucesso`, resultado
+`000000` no log posicional) e saíram como `revisao`. Nada emitiu erro. Três coisas que só a
+instalação podia dizer, e que valem mais que qualquer inferência a partir do manual:
+
+1. **O cliente ARQUIVA RENOMEANDO.** Ele não move para BACKUP com o mesmo nome: acrescenta o carimbo
+   do instante em que concluiu — `ARQUIVO.REM` vira `ARQUIVO.REM.20260827144136918`. O manual não
+   documenta; o §5 (p.13) diz apenas "move para backup". Enquanto `spool.InBackup` procurava o nome
+   exato, **`transmitido` era inalcançável**. O mesmo mecanismo existe na recepção
+   (`ENTRADA\RESTART\`, carimbo de 18 dígitos): carimbar é padrão do produto, não acidente.
+2. **O campo 9 do log traz CAMINHO COMPLETO**, não nome — e caminhos diferentes para o mesmo arquivo
+   conforme a operação. A correlação comparava o campo cru com o nome e nunca casava, deixando
+   `logTransferencia` vazio em todo envelope, em silêncio.
+3. **As duas pendências antigas fecharam**, as duas por medição:
+   - o log posicional é `D:\STCP\Log\YYYYMMDD.log.txt`, na pasta **global** da instalação, não na do
+     perfil (que tem o log legível, `.msg.txt`) — daí `TRANSFER_LOG_GLOB` continuar sendo
+     configuração, mas com um valor conhecido para esta instalação;
+   - o **teto de 26 caracteres NÃO se aplica**: nomes de 36 caracteres foram transmitidos e o banco
+     respondeu `000000`. Deixou de ser divergência entre manual (§11, p.26, erro 1101) e ADR-0061, e
+     virou fato observado.
+
+> **A lição que atravessa as três: o duplo era fiel ao manual, e o manual é incompleto.** O
+> `stcpfake` movia com o nome idêntico e escrevia nome puro no campo 9, então todo critério de
+> aceite confirmava uma premissa que a instalação desmente. Suíte verde, produção errada. Ao mexer
+> no `stcpfake`, a pergunta não é "isto bate com o manual?", é "isto bate com o que foi medido?".
 
 O `go.mod` tem as dependências do SDK (`aws-sdk-go-v2/{config,credentials,service/s3}` + `smithy-go`)
 e nada além. Elas entram **só** em `internal/bucket/s3.go`: o resto do agente continua stdlib pura, e
@@ -77,7 +100,7 @@ o que cada inversão abre:
 1. gravar a intenção      (ledger, fsync)  ← durável, ANTES de tocar a pasta de SAÍDA
 2. depositar na SAÍDA     (spool.Place)    ← a partir daqui o cliente pode enviar a qualquer momento
 3. acionar o cliente      (stcp.Run)
-4. ler a evidência física (sumiu da SAÍDA + apareceu em BACKUP?)
+4. ler a evidência física (sumiu da SAÍDA + apareceu em BACKUP *com carimbo*?)
 5. registrar o desfecho   (ledger done)
 6. publicar o status      (bucket status/) ← pendência gravada ANTES, limpa após confirmar
 7. mover o objeto         (processados/ ou falhas/)
@@ -92,6 +115,12 @@ assim — daí a pendência do passo 0. Sem ela, uma falha ao publicar deixava o
 desfecho, para sempre: o registro já dizia `done` e nada voltava a passar por ali. Vale nos dois
 ciclos (`internal/agent/publish.go`), e o corpo republicado é o **original, byte a byte** — o
 desfecho não mudou, só a publicação falhou.
+
+⚠️ **O passo 4 não procura o nome exato**, e isso não é detalhe de implementação: o cliente arquiva
+**renomeando** (`ARQUIVO.REM.20260827144136918`), e procurar o nome exato tornava `transmitido`
+inalcançável. `spool.InBackup` reconhece o carimbo por `stcp.IsArchiveStamp` — estritamente, nunca
+por prefixo. A assimetria de custo é quem manda: falso negativo devolve `revisao`, caro mas seguro;
+falso positivo afirma `transmitido` sobre um arquivo que não saiu, e aí ninguém reenvia.
 
 Invariantes que decorrem disso:
 
@@ -163,8 +192,8 @@ que impede a rota de passar a mentir.
 | `internal/bucket` | interface `Store` + `Memory` (duplo, vive em código de produção porque o ensaio o usa) + `S3` (adapter real) |
 | `internal/ledger` | intenção em disco local — `O_EXCL` + `Sync` na intenção, tmp+rename na conclusão; nome vira sha256 no caminho. Também o índice de recepção (por hash de conteúdo) e os envelopes pendentes (por chave), cada um em **diretório próprio** |
 | `internal/envelope` | contrato do `status/`, chaves e `ValidName` (guarda de fronteira contra `/`, `..` e marcadores) |
-| `internal/spool` | pastas SAÍDA/BACKUP/LOG — a evidência física; `Place` escreve fora e renomeia para dentro |
-| `internal/stcp` | linha de comando (§6, p.14) e parser do log posicional de 10 campos (§12, p.30) |
+| `internal/spool` | pastas SAÍDA/BACKUP/LOG — a evidência física; `Place` escreve fora e renomeia para dentro; `InBackup` reconhece o nome **carimbado** |
+| `internal/stcp` | linha de comando (§6, p.14) e parser do log posicional de 10 campos (§12, p.30); `CanonicalName` tira caminho e carimbo do campo 9, e `IsArchiveStamp` é a regra do carimbo — mora aqui porque descreve o CLIENTE, e `spool` a consome |
 | `internal/stcp/stcpfake` | duplo do cliente, fiel ao manual (Succeed/Reject/Vanish/Crash) |
 | `cmd/stcp-encenado` | o `stcpfake` como **executável**, para simulação fora da suíte. **Não transmite**, e recusa rodar sem `STCP_ENCENADO_CONFIRMO=nao-transmite-nada` — um falso cliente é perigoso porque parece funcionar |
 | `internal/config` | leitura do ambiente; falha no **boot**, nunca no meio de um ciclo |
@@ -210,7 +239,17 @@ transcreva**. Nomes em teste são fictícios (`PAG_000000.…`, `PERFIL-DE-TESTE
 ## Pendências que atravessam o código
 
 Nenhuma se resolve escrevendo Go — ver "Pendências" no README antes de "consertar" o que parece
-frouxo: nomenclatura do arquivo de remessa não confirmada com o banco, nome do log posicional não
-documentado (daí `STCP_TRANSFER_LOG_GLOB` ser configuração), dialeto da regex do `-f` não declarado
-(daí a trava dupla: padrão antes de depositar **e** filtro no acionamento), autoatualização diária
-do cliente, e ausência de ambiente de homologação.
+frouxo: dialeto da regex do `-f` não declarado (daí a trava dupla: padrão antes de depositar **e**
+filtro no acionamento), autoatualização diária do cliente, e ausência de ambiente de homologação.
+
+O nome do log posicional e o teto de 26 caracteres **saíram desta lista em 27/08/2026**, os dois por
+medição na instalação — ver "O que a instalação real ensinou". `STCP_TRANSFER_LOG_GLOB` continua
+sendo configuração, porque o nome segue sem documentação do fabricante; a diferença é que agora se
+sabe o valor certo para esta instalação, e o default (`*.LOG`) segue errado para ela.
+
+**O que ainda não foi observado, e é onde mora o próximo defeito desta natureza:** o ciclo de
+**recepção nunca rodou de ponta a ponta**. `retorno/` é o único prefixo cuja permissão não foi
+exercitada contra o bucket real, e as linhas `0006`/`0007` do log só foram vistas numa carga em
+lote, nunca num ciclo do agente. Quando o primeiro retorno chegar, acompanhe de perto — foi
+exatamente esse tipo de "está implementado mas nunca foi visto rodar" que produziu o incidente de
+26/08.

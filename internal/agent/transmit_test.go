@@ -181,9 +181,40 @@ func TestCA1_TransmissaoPublicaStatusEMoveParaProcessados(t *testing.T) {
 	}
 
 	// A evidência física que sustentou o veredito.
-	if _, err := os.Stat(filepath.Join(h.backupDir, remittanceName)); err != nil {
-		t.Errorf("o arquivo deveria estar em BACKUP: %v", err)
+	if arquivadoEmBackup(t, h.backupDir, remittanceName) == "" {
+		t.Error("o arquivo deveria estar em BACKUP")
 	}
+}
+
+// arquivadoEmBackup devolve o nome com que o arquivo foi arquivado, ou "" se não estiver lá.
+//
+// O cliente ARQUIVA RENOMEANDO: acrescenta ao nome o carimbo do instante em que concluiu
+// (`ARQUIVO.REM` vira `ARQUIVO.REM.20260827144136918`). O manual não documenta isso — §5, p.13 diz
+// só "move para backup" — e foi medido na instalação em 27/08/2026.
+//
+// O teste NÃO reusa `spool.ehCarimbo`: ele confere o disco por conta própria, com um critério mais
+// FROUXO do que o do código. É deliberado. Se a asserção validasse o carimbo do mesmo jeito que a
+// produção, ela passaria a concordar com o código por construção, e um erro na regra de
+// reconhecimento ficaria invisível dos dois lados — que é exatamente como o defeito original
+// atravessou a suíte.
+func arquivadoEmBackup(t *testing.T, dir, nome string) string {
+	t.Helper()
+	entradas, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("ler a pasta de BACKUP: %v", err)
+	}
+	for _, e := range entradas {
+		if e.IsDir() {
+			continue
+		}
+		if e.Name() == nome || strings.HasPrefix(e.Name(), nome+".") {
+			return e.Name()
+		}
+	}
+	return ""
 }
 
 func TestCA1_EnvelopeCarregaAsLinhasCruasDoLog(t *testing.T) {
@@ -512,13 +543,13 @@ func TestCA7_ArquivoIntrusoNaPastaDeSaidaNaoEhTransmitidoJunto(t *testing.T) {
 	if _, err := os.Stat(intruso); err != nil {
 		t.Errorf("o arquivo intruso saiu da pasta de saída — foi transmitido: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(h.backupDir, "ARQUIVO-QUE-NAO-E-NOSSO.REM")); err == nil {
+	if arquivadoEmBackup(t, h.backupDir, "ARQUIVO-QUE-NAO-E-NOSSO.REM") != "" {
 		t.Error("o arquivo intruso apareceu em BACKUP — foi transmitido")
 	}
 
 	// E a nossa remessa saiu normalmente.
-	if _, err := os.Stat(filepath.Join(h.backupDir, remittanceName)); err != nil {
-		t.Errorf("a nossa remessa deveria ter sido transmitida: %v", err)
+	if arquivadoEmBackup(t, h.backupDir, remittanceName) == "" {
+		t.Error("a nossa remessa deveria ter sido transmitida")
 	}
 }
 
