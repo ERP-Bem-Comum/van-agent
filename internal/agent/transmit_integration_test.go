@@ -151,8 +151,8 @@ func TestCA1_CicloCompletoContraObjectStorageReal(t *testing.T) {
 	}
 
 	// E a evidência física que sustentou o veredito.
-	if _, err := os.Stat(filepath.Join(backupDir, remittanceName)); err != nil {
-		t.Errorf("o arquivo deveria estar em BACKUP: %v", err)
+	if arquivadoEmBackup(t, backupDir, remittanceName) == "" {
+		t.Error("o arquivo deveria estar em BACKUP")
 	}
 
 	// Segunda passada com o mesmo nome: o cliente NÃO pode ser acionado de novo, e agora isso é
