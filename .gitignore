@@ -15,3 +15,10 @@
 # Config real de instalação: caminhos, perfil e OdetteID identificam o convênio.
 .env
 *.ini
+
+# Cópias locais do van.cmd, para ler e colar no Notepad da máquina do cliente STCP.
+# O conteúdo tem perfil, bucket e caminhos de instalação — os mesmos dados que a regra
+# acima protege. A pasta é versionada (só o .gitkeep e o LEIA-ME), o conteúdo NUNCA.
+van_scripts_notepad/*
+!van_scripts_notepad/.gitkeep
+!van_scripts_notepad/LEIA-ME.md
